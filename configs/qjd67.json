@@ -1,0 +1,128 @@
+{
+  "url": "https://qjd67cc.nowkk.com/",
+  "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "user_data_dir": ".browser-profile/qjd67",
+  "browser_profile": {
+    "mode": "managed",
+    "system_user_data_dir": "%LOCALAPPDATA%\\Google\\Chrome\\User Data",
+    "profile_directory": "Default",
+    "chromium_sandbox": true,
+    "hide_automation_banner": true
+  },
+  "headless": false,
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "poll_interval_sec": 0.8,
+  "startup_wait_sec": 3,
+  "canvas_wait_sec": 15,
+  "visual_app_rect": {
+    "enabled": true,
+    "max_dom_width": 700,
+    "min_width": 240,
+    "background_threshold": 18
+  },
+  "action_throttle_sec": 1.2,
+  "cancel_flow": {
+    "confirm_delay_sec": 1.2,
+    "retry_interval_sec": 2.0,
+    "confirm_timeout_sec": 8.0,
+    "max_confirm_clicks": 1
+  },
+  "submit_flow": {
+    "secondary_confirm_delay_sec": 1.0,
+    "secondary_confirm_timeout_sec": 7.0,
+    "password_delay_sec": 0.7,
+    "password_timeout_sec": 8.0,
+    "return_to_start_timeout_sec": 8.0,
+    "state_poll_sec": 0.35
+  },
+  "repost_delay_sec": 30,
+  "auto_make_order": true,
+  "auto_repost": true,
+  "auto_accept": true,
+  "amount": "3000",
+  "limit_min": "1000",
+  "limit_max": "3000",
+  "payment": {
+    "keyword": "魔仙",
+    "card_index": 2,
+    "scrolls": 0,
+    "ocr_attempts": 8,
+    "fallback_to_card_index": false,
+    "return_timeout_sec": 5.0
+  },
+  "password": {
+    "env": "QJD67_PAY_PASSWORD",
+    "value": "",
+    "input_mode": "keyboard",
+    "post_input_wait_sec": 0.8,
+    "confirm_after_input": false
+  },
+  "texts": {
+    "move_page_tab": ["搬砖"],
+    "order_page_tab": ["订单"],
+    "start": ["开始搬砖"],
+    "amount": ["变现金额", "出售金额", "请输入变现金额", "请输入出售金额"],
+    "amount_label": ["变现金额", "出售金额"],
+    "limit": ["单笔限额", "金额范围", "对应单笔限额"],
+    "limit_label": ["单笔限额"],
+    "payment": ["收款方式", "请选择收款方式", "支付方式"],
+    "payment_picker_entry": ["请选择收款方式"],
+    "payment_picker": ["收款方式"],
+    "submit": ["确认变现", "确定变现", "确认"],
+    "secondary_confirm": ["确认变现", "确定变现", "确认", "确定"],
+    "wait_transfer": ["待付款", "请耐心等待买家转账", "等待转账"],
+    "order_detail": ["出售详情"],
+    "active_order": ["待付款", "待接单", "接单中", "待放行", "变现中", "进行中", "待成交", "已上架"],
+    "order_empty": ["暂无订单", "暂无数据", "没有订单"],
+    "pending": ["待接单", "等待代付商接单", "接单中", "变现中", "进行中", "待成交", "已上架"],
+    "cancel": ["取消"],
+    "cancel_confirm": ["确认取消", "确定取消", "确认", "确定"],
+    "accept": ["同意交易", "同意接单", "确认接单", "确认下单", "接单"],
+    "confirm": ["确认同意", "确认变现", "确定变现", "确定", "确认", "完成"],
+    "password_dialog": ["验证支付密码"],
+    "password_confirm": [""],
+    "done": ["已完成", "已取消", "取消成功", "下架成功", "交易成功", "已到账确认", "已接单"],
+    "dangerous_confirm": ["确认资金到账", "确认到账", "确认放行", "到账放行", "已到账放行", "余额是否已增加", "我已检查余额", "确认是否已真实到账", "放行"]
+  },
+  "points": {
+    "start_order": [0.86, 0.21],
+    "amount": [0.5, 0.33],
+    "limit_min": [0.26, 0.485],
+    "limit_max": [0.74, 0.485],
+    "payment_deselect": [0.5, 0.69],
+    "payment_picker_back": [0.08, 0.04],
+    "payment_card_x": 0.5,
+    "payment_card_y_base": 0.69,
+    "payment_card_y_step": 0.155,
+    "submit": [0.5, 0.965],
+    "secondary_confirm": [0.5, 0.91],
+    "submit_confirm": [0.5, 0.91],
+    "password_field": [0.5, 0.56],
+    "password_confirm": [0.5, 0.72],
+    "order_detail_back": [0.08, 0.04],
+    "cancel_pending": [0.87, 0.51],
+    "cancel_confirm": [0.5, 0.56],
+    "keypad": {
+      "1": [0.3, 0.6],
+      "2": [0.5, 0.6],
+      "3": [0.7, 0.6],
+      "4": [0.3, 0.69],
+      "5": [0.5, 0.69],
+      "6": [0.7, 0.69],
+      "7": [0.3, 0.78],
+      "8": [0.5, 0.78],
+      "9": [0.7, 0.78],
+      "0": [0.5, 0.88]
+    }
+  },
+  "templates_dir": "templates",
+  "debug": {
+    "dir": "debug-screenshots",
+    "save_each_tick": false,
+    "save_on_action": true,
+    "draw_ocr": true
+  }
+}

@@ -1,0 +1,30 @@
+[project]
+name = "nopay-canvas-bot"
+version = "0.1.0"
+description = "Canvas screenshot driven browser bot for Flutter pages."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "numpy>=1.26.0",
+  "opencv-python>=4.9.0.80",
+  "pillow>=10.0.0",
+  "playwright>=1.45.0",
+]
+
+[project.optional-dependencies]
+ocr = [
+  "rapidocr-onnxruntime>=1.3.24",
+]
+
+[project.scripts]
+qjd67-canvas-bot = "canvas_bot.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["canvas_bot*"]
+
+[tool.uv]
+package = true
