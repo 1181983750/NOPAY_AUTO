@@ -435,6 +435,27 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(browser.drags, [(0.50, 0.42, 0.50, 0.70)])
         self.assertFalse(asyncio.run(bot.maybe_pull_refresh_orders(browser, Rect(0, 0, 506, 900), image, [])))
 
+    def test_unknown_page_refreshes_after_configured_consecutive_scans(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.reloads = 0
+
+            async def reload(self) -> None:
+                self.reloads += 1
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"unknown_page_refresh": {"consecutive_scans": 6, "cooldown_sec": 20}}
+        bot.unknown_page_streak = 5
+        bot.last_unknown_page_reload_at = 0.0
+        bot.last_action_at = 0.0
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        image = Image.new("RGB", (506, 900), "white")
+        browser = FakeBrowser()
+
+        self.assertTrue(asyncio.run(bot.handle_unknown_page(browser, Rect(0, 0, 506, 900), image, [])))
+        self.assertEqual(browser.reloads, 1)
+        self.assertEqual(bot.unknown_page_streak, 0)
+
     def test_page_classifier_prefers_withdraw_form_over_visible_navigation(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {

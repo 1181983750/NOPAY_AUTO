@@ -12,6 +12,10 @@
   "headless": false,
   "viewport": null,
   "poll_interval_sec": 0.5,
+  "unknown_page_refresh": {
+    "consecutive_scans": 6,
+    "cooldown_sec": 20
+  },
   "startup_wait_sec": 3,
   "canvas_wait_sec": 15,
   "visual_app_rect": {

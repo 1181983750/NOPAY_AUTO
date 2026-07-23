@@ -546,6 +546,12 @@ class BrowserSession:
         )
         return Image.open(io.BytesIO(raw)).convert("RGB")
 
+    async def reload(self) -> None:
+        """Reload the current Flutter page without following or clicking any modal action."""
+        assert self.page is not None
+        await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+        await self.page.wait_for_timeout(800)
+
     async def click_abs(self, x: float, y: float) -> None:
         assert self.page is not None
         await self.page.mouse.move(x, y)
@@ -626,6 +632,8 @@ class CanvasBot:
         self.multi_cancel_recovering = False
         self.last_visual_page = ""
         self.last_orders_refresh_at = 0.0
+        self.unknown_page_streak = 0
+        self.last_unknown_page_reload_at = 0.0
 
     @property
     def texts(self) -> dict[str, list[str]]:
@@ -688,6 +696,18 @@ class CanvasBot:
         except (TypeError, ValueError):
             configured = 40
         return max(1, min(configured, 120))
+
+    def unknown_page_refresh_cfg(self) -> tuple[int, float]:
+        cfg = self.cfg.get("unknown_page_refresh", {})
+        try:
+            scans = int(cfg.get("consecutive_scans", 6))
+        except (TypeError, ValueError):
+            scans = 6
+        try:
+            cooldown = float(cfg.get("cooldown_sec", 20))
+        except (TypeError, ValueError):
+            cooldown = 20.0
+        return max(2, min(scans, 30)), max(5.0, cooldown)
 
     def payment_keywords(self) -> list[str]:
         multi_keywords = self.multi_order_cfg().get("payment_keywords")
@@ -2399,6 +2419,33 @@ class CanvasBot:
         self.move_page_opened = True
         return True
 
+    async def handle_unknown_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Recover from a stuck canvas/loading state without touching risky confirmations."""
+        self.unknown_page_streak = getattr(self, "unknown_page_streak", 0) + 1
+        consecutive_scans, cooldown_sec = self.unknown_page_refresh_cfg()
+        if self.unknown_page_streak < consecutive_scans:
+            print(f"[state] 未识别当前页面，等待刷新阈值 {self.unknown_page_streak}/{consecutive_scans}。")
+            return True
+
+        now = time.time()
+        last_reload = getattr(self, "last_unknown_page_reload_at", 0.0)
+        if now - last_reload < cooldown_sec:
+            print("[state] 未识别页面仍在刷新冷却期，不执行任何点击。")
+            return True
+
+        await self.save_action_debug(image, boxes, "unknown_page_reload")
+        self.record_action("连续未识别页面，刷新当前网页重试")
+        self.last_unknown_page_reload_at = now
+        self.unknown_page_streak = 0
+        await browser.reload()
+        return True
+
     async def tick(self, browser: BrowserSession) -> None:
         rect = await browser.app_rect()
         image = await browser.screenshot_app(rect)
@@ -2411,6 +2458,11 @@ class CanvasBot:
 
         page = self.classify_visual_page(image, boxes)
         self.note_visual_page(page)
+
+        if page == "unknown":
+            await self.handle_unknown_page(browser, rect, image, boxes)
+            return
+        self.unknown_page_streak = 0
 
         # A manual navigation away from a failed form is an explicit recovery.
         # Forget the stale failure, then let the handler for the new page decide.
@@ -2457,7 +2509,6 @@ class CanvasBot:
         if self.form_expected_until and time.time() <= self.form_expected_until:
             print("[state] 等待变现页面加载。")
             return
-        print("[state] 未识别当前页面，不执行任何表单或订单操作。")
 
     async def run(self) -> None:
         async with BrowserSession(self.cfg) as browser:
