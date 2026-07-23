@@ -681,6 +681,14 @@ class CanvasBot:
     def multi_order_enabled(self) -> bool:
         return bool(self.multi_order_cfg().get("enabled", False))
 
+    def multi_cancel_search_max_steps(self) -> int:
+        """Bound a visual tail scan without ever treating a visible row as the tail."""
+        try:
+            configured = int(self.multi_order_cfg().get("cancel_search_max_steps", 40))
+        except (TypeError, ValueError):
+            configured = 40
+        return max(1, min(configured, 120))
+
     def payment_keywords(self) -> list[str]:
         multi_keywords = self.multi_order_cfg().get("payment_keywords")
         payment = self.cfg.get("payment", {})
@@ -2026,23 +2034,31 @@ class CanvasBot:
         is_multi = self.multi_order_enabled()
         target: TextBox | TemplateMatch | None = self.find_bottom_cancel_target(image, boxes) if is_multi else self.vision.find_template(image, "cancel")
         if is_multi:
-            if not target and self.multi_cancel_scroll_steps and not self.multi_cancel_recovering:
+            if not target and self.multi_cancel_scroll_steps:
                 self.record_action("未找到进行中订单，向上回滚取消列表")
                 await browser.wheel_relative(rect, 0.50, 0.66, -360)
+                self.multi_cancel_scroll_steps -= 1
                 self.multi_cancel_recovering = True
                 return True
-            if target and not self.multi_cancel_recovering:
-                _, target_y = target.center
-                # A card near the middle usually has older active cards below it.
-                # Stop as soon as a completed/cancelled row appears below it: that
-                # is the boundary before historical orders, not another active card.
+            if target:
+                # Only a completed/cancelled row below the button proves this is
+                # the oldest active order. A low visible button alone is not enough
+                # when the active section overflows the viewport.
                 history_below = self.has_terminal_history_below(target, boxes)
-                if target_y < image.height * 0.72 and self.multi_cancel_scroll_steps < 4 and not history_below:
-                    self.record_action(f"按先进先出向下查找最尾部订单 {self.multi_cancel_scroll_steps + 1}/4")
+                if not history_below:
+                    max_steps = self.multi_cancel_search_max_steps()
+                    if self.multi_cancel_scroll_steps >= max_steps:
+                        await self.save_action_debug(image, boxes, "cancel_tail_not_confirmed")
+                        print(f"[warn] 已向下扫描 {max_steps} 次仍未确认活动订单尾部，不点击取消。")
+                        return True
+                    self.record_action(
+                        f"按先进先出继续向下查找最尾部挂单 "
+                        f"{self.multi_cancel_scroll_steps + 1}/{max_steps}"
+                    )
                     await browser.wheel_relative(rect, 0.50, 0.66, 360)
                     self.multi_cancel_scroll_steps += 1
+                    self.multi_cancel_recovering = False
                     return True
-            if self.multi_cancel_recovering:
                 self.multi_cancel_recovering = False
         anchor = self.find_pending_anchor(image, boxes)
         if not target and isinstance(anchor, TextBox) and not text_has_any(anchor.text, self.texts.get("cancel", [])):

@@ -40,13 +40,14 @@
   "auto_repost": true,
   "auto_accept": true,
   "amount": "3000",
-  "limit_min": "1500",
+  "limit_min": "1200",
   "limit_max": "3000",
   "payment": {
     "keyword": "魔仙",
     "keywords": [
       "魔仙",
       "0.0",
+      "句号",
       "成瘾",
       "锥子",
       "建材",
@@ -61,9 +62,11 @@
   "multi_order": {
     "enabled": true,
     "adopt_existing_pending_orders": true,
+    "cancel_search_max_steps": 40,
     "payment_keywords": [
       "魔仙",
       "0.0",
+      "句号",
       "成瘾",
       "锥子",
       "建材",

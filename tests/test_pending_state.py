@@ -237,6 +237,35 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(browser.wheels, [(0.50, 0.66, 360)])
         self.assertEqual(bot.multi_cancel_scroll_steps, 1)
 
+    def test_multi_order_tail_scan_does_not_stop_after_four_visible_cards(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.wheels: list[tuple[float, float, float]] = []
+
+            async def wheel_relative(self, _rect, x: float, y: float, delta: float) -> None:
+                self.wheels.append((x, y, delta))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "action_throttle_sec": 0.1,
+            "texts": {"cancel": ["取消"], "done": ["已取消", "已完成"]},
+            "multi_order": {"enabled": True, "cancel_search_max_steps": 8},
+        }
+        bot.last_cancel_at = 0.0
+        bot.last_action_at = 0.0
+        bot.multi_cancel_scroll_steps = 4
+        bot.multi_cancel_recovering = False
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (506, 900), "white")
+        browser = FakeBrowser()
+        visible_active_cancel = TextBox("取消", 0.99, 420, 720, 480, 750)
+
+        self.assertTrue(asyncio.run(bot.cancel_pending_order(browser, Rect(0, 0, 506, 900), image, [visible_active_cancel])))
+        self.assertEqual(browser.wheels, [(0.50, 0.66, 360)])
+        self.assertEqual(bot.multi_cancel_scroll_steps, 5)
+
     def test_terminal_history_below_cancel_stops_multi_order_scrolling(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"texts": {"done": ["已取消", "已完成", "已接单"]}}
