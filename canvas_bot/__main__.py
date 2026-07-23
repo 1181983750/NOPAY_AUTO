@@ -82,6 +82,41 @@ def is_chrome_running() -> bool:
     return "chrome.exe" in result.stdout.lower()
 
 
+class PushPlusNotifier:
+    """Best-effort low-frequency notifications through the PushPlus WeChat channel."""
+
+    endpoint = "https://www.pushplus.plus/send/"
+
+    def __init__(self) -> None:
+        self.token = str(os.getenv("QJD67_PUSHPLUS_TOKEN") or "").strip()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token)
+
+    def send(self, title: str, content: str) -> str:
+        if not self.enabled:
+            return "disabled"
+        payload = json.dumps(
+            {
+                "token": self.token,
+                "title": title,
+                "content": content,
+                "template": "txt",
+                "channel": "wechat",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:  # noqa: S310 - configured public HTTPS endpoint
+            return response.read().decode("utf-8", errors="replace")
+
+
 @dataclass
 class Rect:
     left: float
@@ -607,6 +642,8 @@ class CanvasBot:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self.vision = VisionEngine(cfg)
+        self.pushplus = PushPlusNotifier()
+        self.notified_events: set[str] = set()
         self.pending_since = 0.0
         self.form_expected_after = 0.0
         self.form_expected_until = 0.0
@@ -642,6 +679,17 @@ class CanvasBot:
         self.last_orders_refresh_at = 0.0
         self.unknown_page_streak = 0
         self.last_unknown_page_reload_at = 0.0
+
+    async def notify_once(self, event: str, title: str, content: str) -> None:
+        """Send one notification per event per run; notification failures never stop the bot."""
+        if event in self.notified_events or not self.pushplus.enabled:
+            return
+        self.notified_events.add(event)
+        try:
+            result = await asyncio.to_thread(self.pushplus.send, title, content)
+            print(f"[notify] PushPlus 已提交：{event} {result[:120]}")
+        except Exception as exc:
+            print(f"[notify] PushPlus 发送失败：{event} {exc}")
 
     @property
     def texts(self) -> dict[str, list[str]]:
@@ -2491,6 +2539,13 @@ class CanvasBot:
                 pass
         self.note_visual_page(page)
 
+        if page == "trade_notification":
+            await self.notify_once("trade_notification", "NO钱包：收到交易通知", "检测到新的交易通知，请及时处理。")
+        elif page == "order_exception_dialog":
+            await self.notify_once("order_exception", "NO钱包：订单异常", "检测到订单异常提醒，请及时检查。")
+        elif page in {"waiting_transfer", "waiting_transfer_detail"}:
+            await self.notify_once("waiting_transfer", "NO钱包：待付款", "订单已进入待付款状态，请留意买家转账。")
+
         if page == "unknown":
             await self.handle_unknown_page(browser, rect, image, boxes)
             return
@@ -2549,6 +2604,7 @@ class CanvasBot:
         async with BrowserSession(self.cfg) as browser:
             print(f"[boot] OCR: {self.vision.ocr_name}")
             print("[boot] Browser ready. Press Ctrl+C to stop.")
+            await self.notify_once("started", "NO钱包：脚本已启动", f"OCR：{self.vision.ocr_name}")
             while True:
                 try:
                     await self.tick(browser)
