@@ -2609,6 +2609,9 @@ class CanvasBot:
                 try:
                     await self.tick(browser)
                 except Exception as exc:
+                    if "Target page, context or browser has been closed" in str(exc):
+                        print("[error] 浏览器页面已关闭，脚本停止。")
+                        break
                     print(f"[error] tick failed: {exc}")
                 await asyncio.sleep(float(self.cfg.get("poll_interval_sec", 0.8)))
 

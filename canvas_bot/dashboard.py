@@ -219,7 +219,9 @@ class DashboardState:
         for path in self.debug_dir.iterdir():
             if not path.is_file():
                 continue
-            if path == self.log_path or path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            # Keep the log file in place. On Windows another dashboard/bot
+            # process may still hold it open, making unlink fail with WinError 32.
+            if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
                 path.unlink()
 
     def start(self) -> tuple[bool, str]:
