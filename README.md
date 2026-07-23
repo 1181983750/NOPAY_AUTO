@@ -60,6 +60,18 @@ uv run qjd67-canvas-bot snapshot --config configs/qjd67.json
 uv run qjd67-canvas-bot run --config configs/qjd67.json
 ```
 
+## 本地控制台
+
+启动本机网页控制台：
+
+```powershell
+uv run qjd67-canvas-bot dashboard --config configs/qjd67.json
+```
+
+浏览器打开 `http://127.0.0.1:8765` 后可调整金额、最小/最大限额、超时重挂、轮询和确认等待参数，也能启动或停止由控制台创建的脚本、查看日志和调试截图。保存参数后需要在控制台停止并重新启动脚本才会生效。
+
+控制台只监听本机地址。支付密码可在控制台中输入，但只保留在当前控制台内存；脚本仅在识别到支付密码弹窗时，通过随机令牌保护的本机接口读取最新值。因此脚本运行中也可先设置或更新密码，不会写入 JSON、日志、Git 或子进程环境变量。关闭控制台后需要重新输入。也可继续使用 `QJD67_PAY_PASSWORD` 环境变量。
+
 默认配置会使用 `.browser-profile/qjd67` 作为独立调试窗口。第一次需要手动登录，之后 cookie 会保留：
 
 ```json
@@ -70,7 +82,24 @@ uv run qjd67-canvas-bot run --config configs/qjd67.json
 
 这个模式不会占用你平时正在用的 Chrome，也不用关闭已有 Chrome 窗口。
 
+默认 `viewport` 为 `null`，调试浏览器会使用 Chrome 的原生窗口尺寸，让目标网站保持与手动打开时相同的响应式布局。脚本仍会每轮识别 Flutter 内容区的位置。若要固定窗口以便复现 OCR 调试，可改回：
+
+```json
+"viewport": { "width": 1280, "height": 900 }
+```
+
 脚本打开后会先通过 OCR 点击顶部“搬砖”标签，再识别“开始搬砖”按钮；不会在默认的“买卖”页直接开始挂单。
+
+多挂单参数可在配置中设置：
+
+```json
+"multi_order": {
+  "enabled": true,
+  "payment_keywords": ["魔仙", "另一张卡"],
+}
+```
+
+每次成功挂单后，脚本按 `payment_keywords` 顺序循环选择收款卡。它会 OCR 读取顶部“搬砖余额”，单笔金额不超过当前余额；当余额低于配置的 `limit_min`（最小限额）时停止新增挂单。若余额不足配置的变现金额，脚本点击页面的“全部”填写精确余额。只会对本次运行期间创建并计时的挂单进行超时取消，旧挂单不会被盲目取消。
 
 如果以后想复用你平时 Chrome 里的登录状态，再把 `mode` 改成 `system`：
 

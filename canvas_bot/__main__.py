@@ -10,7 +10,10 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -340,7 +343,9 @@ class BrowserSession:
             user_data_dir = resolve_path(self.cfg.get("user_data_dir", ".browser-profile/qjd67"))
         user_data_dir.mkdir(parents=True, exist_ok=True)
 
-        viewport = self.cfg.get("viewport") or {"width": 1280, "height": 900}
+        # ``null`` opts into Chrome's native window viewport. Keep a fixed
+        # viewport available for reproducible OCR debugging when needed.
+        viewport_cfg = self.cfg.get("viewport", {"width": 1280, "height": 900})
         args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-features=Translate",
@@ -351,10 +356,13 @@ class BrowserSession:
 
         launch_args: dict[str, Any] = {
             "headless": bool(self.cfg.get("headless", False)),
-            "viewport": viewport,
             "args": args,
             "chromium_sandbox": bool(profile_cfg.get("chromium_sandbox", True)),
         }
+        if viewport_cfg is None:
+            launch_args["no_viewport"] = True
+        else:
+            launch_args["viewport"] = viewport_cfg
         if profile_cfg.get("hide_automation_banner", True):
             launch_args["ignore_default_args"] = ["--enable-automation"]
 
@@ -554,6 +562,22 @@ class BrowserSession:
         await self.page.mouse.move(x, y)
         await self.page.mouse.wheel(0, delta_y)
 
+    async def drag_relative(
+        self,
+        rect: Rect,
+        start_rx: float,
+        start_ry: float,
+        end_rx: float,
+        end_ry: float,
+    ) -> None:
+        assert self.page is not None
+        start_x, start_y = rect.point(start_rx, start_ry)
+        end_x, end_y = rect.point(end_rx, end_ry)
+        await self.page.mouse.move(start_x, start_y)
+        await self.page.mouse.down()
+        await self.page.mouse.move(end_x, end_y, steps=12)
+        await self.page.mouse.up()
+
     async def replace_text(self, text: str) -> None:
         assert self.page is not None
         await self.page.keyboard.press("Control+A")
@@ -578,6 +602,8 @@ class CanvasBot:
         self.last_form_submit_at = 0.0
         self.last_accept_at = 0.0
         self.last_waiting_transfer_back_at = 0.0
+        self.last_post_accept_detail_back_at = 0.0
+        self.last_exception_ignore_at = 0.0
         self.post_accept_order_check = ""
         self.post_accept_order_check_until = 0.0
         self.last_cancel_at = 0.0
@@ -587,8 +613,19 @@ class CanvasBot:
         self.move_page_opened = False
         self.payment_selected_for_form = False
         self.form_submission_failed = False
+        self.form_interrupted_by_trade_notification = False
+        self.last_form_interruption_back_at = 0.0
         self.accept_confirm_until = 0.0
         self.cancel_confirm_until = 0.0
+        self.multi_pending_since: list[float] = []
+        self.multi_batch_complete = False
+        self.multi_payment_index = 0
+        self.form_values: dict[str, str] = {}
+        self.cancelling_multi_order = False
+        self.multi_cancel_scroll_steps = 0
+        self.multi_cancel_recovering = False
+        self.last_visual_page = ""
+        self.last_orders_refresh_at = 0.0
 
     @property
     def texts(self) -> dict[str, list[str]]:
@@ -611,8 +648,139 @@ class CanvasBot:
         env_name = password_cfg.get("env") or "QJD67_PAY_PASSWORD"
         return str(os.getenv(env_name) or password_cfg.get("value") or "")
 
+    def dashboard_password(self) -> str:
+        """Read the current in-memory password from the local dashboard on demand."""
+        base_url = str(os.getenv("QJD67_DASHBOARD_URL") or "").rstrip("/")
+        token = str(os.getenv("QJD67_DASHBOARD_TOKEN") or "")
+        if not base_url or not token:
+            return ""
+        request = urllib.request.Request(
+            f"{base_url}/api/internal/password",
+            headers={"X-Dashboard-Token": token},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.2) as response:  # noqa: S310 - loopback token endpoint
+                value = json.loads(response.read().decode("utf-8")).get("password", "")
+        except (OSError, ValueError, urllib.error.URLError):
+            return ""
+        password = str(value).strip()
+        return password if len(password) == 6 and password.isdigit() else ""
+
+    async def resolve_payment_password(self) -> str:
+        password = self.password()
+        if password:
+            return password
+        return await asyncio.to_thread(self.dashboard_password)
+
     def password_cfg(self) -> dict[str, Any]:
         return self.cfg.get("password", {})
+
+    def multi_order_cfg(self) -> dict[str, Any]:
+        return self.cfg.get("multi_order", {})
+
+    def multi_order_enabled(self) -> bool:
+        return bool(self.multi_order_cfg().get("enabled", False))
+
+    def payment_keywords(self) -> list[str]:
+        multi_keywords = self.multi_order_cfg().get("payment_keywords")
+        payment = self.cfg.get("payment", {})
+        raw = multi_keywords or payment.get("keywords") or payment.get("keyword") or ""
+        if isinstance(raw, str):
+            values = re.split(r"[,，;；\n]+", raw)
+        else:
+            values = list(raw)
+        return [str(value).strip() for value in values if str(value).strip()]
+
+    def current_payment_keyword(self) -> str:
+        keywords = self.payment_keywords()
+        if not keywords:
+            return ""
+        return keywords[self.multi_payment_index % len(keywords)]
+
+    @staticmethod
+    def parse_money(value: str) -> Decimal | None:
+        match = re.search(r"\d[\d,]*(?:\.\d{1,2})?", str(value or ""))
+        if not match:
+            return None
+        try:
+            money = Decimal(match.group(0).replace(",", ""))
+        except InvalidOperation:
+            return None
+        return money if money.is_finite() and money >= 0 else None
+
+    @staticmethod
+    def decimal_text(value: Decimal) -> str:
+        return format(value.quantize(Decimal("0.01")).normalize(), "f")
+
+    def find_available_balance(self, image: Image.Image, boxes: list[TextBox]) -> Decimal | None:
+        """Read the top-of-page 搬砖余额, never an amount from a historical order row."""
+        width, height = image.size
+        label = self.vision.find_text(
+            boxes,
+            self.texts.get("balance", ["搬砖余额"]),
+            max_text_length=24,
+            bounds=(0, 0, width * 0.75, height * 0.42),
+        )
+        if not isinstance(label, TextBox):
+            return None
+        candidates: list[tuple[float, Decimal]] = []
+        for box in boxes:
+            money = self.parse_money(box.text)
+            if money is None:
+                continue
+            cx, cy = box.center
+            # Keep the search tightly under the top balance label. Lower dashboard counters
+            # such as “我的下级 4” are otherwise valid numbers but not available balance.
+            if cy < label.top - height * 0.03 or cy > label.bottom + height * 0.13:
+                continue
+            if cx < label.left - width * 0.08 or cx > width * 0.78:
+                continue
+            distance = abs(cx - label.left) / width + abs(cy - label.bottom) / height
+            candidates.append((distance, money))
+        # The balance is the largest monetary value in this small, label-bound region.
+        return max(candidates, default=(0.0, None), key=lambda item: item[1])[1]
+
+    def prepare_multi_order_values(self, balance: Decimal) -> bool:
+        """Plan one order from the currently visible balance without exceeding it."""
+        try:
+            configured_amount = Decimal(str(self.cfg.get("amount") or ""))
+        except InvalidOperation:
+            configured_amount = Decimal(0)
+        if configured_amount <= 0:
+            print("[warn] amount 配置无效，停止多挂单。")
+            self.multi_batch_complete = True
+            return False
+        limit_min = Decimal(str(self.cfg.get("limit_min") or "0"))
+        if balance < limit_min:
+            self.multi_batch_complete = True
+            self.form_values = {}
+            print(f"[state] 搬砖余额 {self.decimal_text(balance)} 小于最小限额 {self.decimal_text(limit_min)}，停止新增挂单。")
+            return False
+        amount = min(configured_amount, balance)
+        limit_max = Decimal(str(self.cfg.get("limit_max") or amount))
+        if amount < limit_min:
+            self.multi_batch_complete = True
+            self.form_values = {}
+            print(f"[state] 本次可挂金额 {self.decimal_text(amount)} 小于最小限额，停止新增挂单。")
+            return False
+        # The app accepts cents for the total amount, but its per-order limit
+        # inputs reject decimal values. Round down only the maximum limit so it
+        # remains valid and never exceeds the total order amount.
+        limit_max = min(limit_max, amount).to_integral_value(rounding=ROUND_DOWN)
+        if limit_max < limit_min:
+            self.multi_batch_complete = True
+            self.form_values = {}
+            print("[state] 当前余额不足以满足最小限额，停止新增挂单。")
+            return False
+        self.form_values = {
+            "amount": self.decimal_text(amount),
+            "limit_min": self.decimal_text(limit_min),
+            "limit_max": self.decimal_text(limit_max),
+            # When the remaining balance is less than the configured amount,
+            # Flutter accepts the exact value more reliably through its 全部 button.
+            "use_all_balance": "true" if balance < configured_amount else "false",
+        }
+        return True
 
     def can_act(self) -> bool:
         throttle = float(self.cfg.get("action_throttle_sec", 1.2))
@@ -650,6 +818,77 @@ class CanvasBot:
                 max_text_length=20,
                 bounds=(width * 0.20, 0, width * 0.80, height * 0.16),
             )
+        )
+
+    def is_order_detail_interrupt_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Recognize a buyer/order detail page that interrupts a posting form mid-flow."""
+        width, height = image.size
+        detail_terms = list(self.texts.get("order_detail", ["出售详情"]))
+        detail_terms.extend(self.texts.get("buyer_detail", ["买家详情", "订单详情"]))
+        return bool(
+            self.vision.find_text(
+                boxes,
+                detail_terms,
+                max_text_length=20,
+                bounds=(width * 0.20, 0, width * 0.80, height * 0.16),
+            )
+        )
+
+    def find_trade_notification(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
+        """Find the incoming-order modal that can appear above any other page."""
+        template = self.vision.find_template(image, "trade_notification")
+        if template:
+            return template
+        width, height = image.size
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("trade_notification", ["交易通知"]),
+            prefer_center=True,
+            max_text_length=20,
+            bounds=(width * 0.12, height * 0.10, width * 0.88, height * 0.48),
+        )
+
+    def find_order_exception_dialog(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
+        """Recognize the timeout/order-exception reminder modal."""
+        template = self.vision.find_template(image, "order_exception")
+        if template:
+            return template
+        width, height = image.size
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("order_exception", ["订单异常提醒"]),
+            prefer_center=True,
+            max_text_length=24,
+            bounds=(width * 0.12, height * 0.16, width * 0.88, height * 0.68),
+        )
+
+    def find_order_exception_ignore(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
+        template = self.vision.find_template(image, "order_exception_ignore")
+        if template:
+            return template
+        width, height = image.size
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("order_exception_ignore", ["忽略"]),
+            prefer_bottom=True,
+            max_text_length=12,
+            bounds=(width * 0.08, height * 0.45, width * 0.54, height * 0.94),
+        )
+
+    def find_accept_confirm_target(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
+        """Only accept a fresh, explicit 接单 confirmation; never reuse a form button underneath it."""
+        template = self.vision.find_template(image, "accept_confirm")
+        if template:
+            return template
+        width, height = image.size
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("accept_confirm", ["确认同意", "确认接单", "确定接单"]),
+            prefer_center=True,
+            prefer_bottom=True,
+            max_text_length=16,
+            exclude=self.texts.get("dangerous_confirm", []),
+            bounds=(width * 0.12, height * 0.25, width * 0.88, height * 0.92),
         )
 
     def cancel_flow_cfg(self) -> dict[str, float | int]:
@@ -732,6 +971,87 @@ class CanvasBot:
             bounds=(width * 0.42, 0, width * 0.88, height * 0.15),
         )
 
+    def is_empty_orders_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Recognize the 订单 > 进行中 empty state before attempting to read 搬砖余额."""
+        width, height = image.size
+        empty = self.vision.find_text(
+            boxes,
+            self.texts.get("order_empty", ["暂无订单", "暂无数据", "没有订单"]),
+            max_text_length=24,
+            bounds=(width * 0.16, height * 0.18, width * 0.84, height * 0.84),
+        )
+        progress_tab = self.vision.find_text(
+            boxes,
+            ["进行中"],
+            max_text_length=12,
+            bounds=(0, height * 0.06, width * 0.34, height * 0.22),
+        )
+        return bool(empty and progress_tab)
+
+    def is_orders_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Recognize the orders list by its top navigation and order-state tabs."""
+        width, height = image.size
+        order_tab = self.find_order_page_tab(image, boxes)
+        state_tab = self.vision.find_text(
+            boxes,
+            ["进行中", "成功", "失败/取消", "全部"],
+            max_text_length=12,
+            bounds=(0, height * 0.06, width * 0.95, height * 0.23),
+        )
+        return bool(order_tab and state_tab)
+
+    def classify_visual_page(self, image: Image.Image, boxes: list[TextBox]) -> str:
+        """Classify the visible Flutter page before deciding which actions are allowed."""
+        if self.find_trade_notification(image, boxes):
+            return "trade_notification"
+        if self.find_order_exception_dialog(image, boxes):
+            return "order_exception_dialog"
+        if self.find_password_dialog(image, boxes):
+            return "password_dialog"
+        if getattr(self, "cancel_confirm_until", 0) and self.find_cancel_confirm_target(image, boxes):
+            return "cancel_confirm_dialog"
+        # A 订单 > 进行中 list can contain a row labelled 待付款. It is still a
+        # list page (and must receive its periodic pull-to-refresh), not the
+        # full-screen 出售详情 waiting page.
+        if self.is_empty_orders_page(image, boxes):
+            return "orders_empty"
+        if self.is_orders_page(image, boxes):
+            return "orders_list"
+        if self.is_waiting_transfer_detail(image, boxes):
+            return "waiting_transfer_detail"
+        if self.is_waiting_transfer(image, boxes):
+            return "waiting_transfer"
+        if self.is_order_form_visible(image, boxes):
+            return "withdraw_form"
+        if self.is_order_detail_interrupt_page(image, boxes):
+            return "order_detail"
+        if self.find_available_balance(image, boxes) is not None or self.find_start_order_target(image, boxes):
+            return "move_page"
+        if self.find_move_page_tab(image, boxes):
+            return "navigation"
+        return "unknown"
+
+    def note_visual_page(self, page: str) -> None:
+        if page == getattr(self, "last_visual_page", ""):
+            return
+        self.last_visual_page = page
+        labels = {
+            "password_dialog": "支付密码弹窗",
+            "trade_notification": "交易通知",
+            "order_exception_dialog": "订单异常提醒",
+            "cancel_confirm_dialog": "取消确认弹窗",
+            "waiting_transfer_detail": "待付款订单详情",
+            "waiting_transfer": "待付款订单",
+            "withdraw_form": "变现表单",
+            "orders_empty": "空订单页",
+            "order_detail": "订单详情",
+            "orders_list": "订单列表",
+            "move_page": "搬砖页",
+            "navigation": "导航页",
+            "unknown": "未知/加载页",
+        }
+        print(f"[page] 当前页面：{labels.get(page, page)}")
+
     def find_active_order_anchor(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
         template = self.vision.find_template(image, "active_order")
         if template:
@@ -790,6 +1110,15 @@ class CanvasBot:
             scan = await self.scan_app(browser)
             rect, image, boxes = scan
             last_scan = scan
+            if self.find_trade_notification(image, boxes):
+                print("[state] 提交等待期间检测到交易通知，优先处理来单。")
+                await self.handle_incoming_order(browser, rect, image, boxes)
+                return None
+            if self.find_order_exception_dialog(image, boxes):
+                print("[state] 提交等待期间检测到订单异常提醒，按忽略关闭。")
+                await self.handle_order_exception_dialog(browser, rect, image, boxes)
+                await asyncio.sleep(max(0.15, cfg["state_poll_sec"]))
+                continue
             if state == "password" and self.find_password_dialog(image, boxes):
                 print("[state] Playwright 检测到支付密码弹窗")
                 return scan
@@ -828,6 +1157,42 @@ class CanvasBot:
             prefer_bottom=True,
             max_text_length=30,
             exclude=self.texts.get("done", []),
+        )
+
+    def find_bottom_cancel_target(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | None:
+        """Pick the lowest visible pending-order cancel button (oldest order in this UI)."""
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("cancel", []),
+            prefer_right=True,
+            prefer_bottom=True,
+            max_text_length=16,
+            exclude=self.texts.get("done", []),
+        )
+
+    def has_terminal_history_below(self, target: TextBox | TemplateMatch, boxes: list[TextBox]) -> bool:
+        """A terminal row below Cancel marks the end of the active-order section."""
+        if not isinstance(target, TextBox):
+            return False
+        terminal_terms = [
+            term
+            for term in self.texts.get("done", [])
+            if normalize_text(term) not in {"已接单"}
+        ]
+        target_y = target.center[1]
+        return any(
+            text_has_any(box.text, terminal_terms) and box.center[1] > target_y + 8
+            for box in boxes
+        )
+
+    def count_pending_orders(self, boxes: list[TextBox]) -> int:
+        """Count visual pending-state labels so manual cancellations can clear local timers."""
+        pending_terms = self.texts.get("pending", [])
+        done_terms = self.texts.get("done", [])
+        return sum(
+            1
+            for box in boxes
+            if text_has_any(box.text, pending_terms) and not text_has_any(box.text, done_terms)
         )
 
     def clear_stale_pending_if_missing(self, anchor: TextBox | TemplateMatch | None, boxes: list[TextBox]) -> bool:
@@ -1057,7 +1422,57 @@ class CanvasBot:
         boxes: list[TextBox],
     ) -> bool:
         now = time.time()
-        if self.is_waiting_transfer(image, boxes):
+        notification = self.find_trade_notification(image, boxes)
+        if notification:
+            if not self.cfg.get("auto_accept", True):
+                print("[state] 检测到交易通知，自动接单已关闭。")
+                return True
+            target = self.vision.find_text(
+                boxes,
+                self.texts.get("accept", []),
+                prefer_right=True,
+                prefer_bottom=True,
+                max_text_length=20,
+                exclude=(self.texts.get("done", []) + self.texts.get("dangerous_confirm", [])),
+            )
+            if not target:
+                await self.save_action_debug(image, boxes, "trade_notification_accept_not_found")
+                print("[state] 检测到交易通知，等待识别同意交易按钮。")
+                return True
+            if now - self.last_accept_at < 0.5:
+                return True
+            await self.save_action_debug(image, boxes, "trade_notification_accept")
+            self.record_action("交易通知，按文字点击同意交易")
+            self.last_accept_at = now
+            self.form_expected_after = 0
+            self.form_expected_until = 0
+            self.form_submission_failed = False
+            self.form_interrupted_by_trade_notification = True
+            self.form_values = {}
+            await self.click_visual_target(browser, rect, target)
+            self.accept_confirm_until = time.time() + 6
+            return True
+        if self.is_order_detail_interrupt_page(image, boxes) and (
+            self.form_expected_until or self.form_submission_failed
+        ):
+            # A new order can navigate away while a multi-order form is being filled.
+            # Drop only the in-progress form state, then return to a page where the
+            # normal order-status checks can decide what to do next.
+            self.form_expected_after = 0
+            self.form_expected_until = 0
+            self.form_submission_failed = False
+            self.payment_selected_for_form = False
+            self.form_values = {}
+            if now - self.last_form_interruption_back_at >= 1.5:
+                await self.save_action_debug(image, boxes, "order_interrupt_back")
+                self.record_action("挂单被订单详情打断，返回后检查订单状态")
+                back = self.points.get("order_detail_back", [0.08, 0.04])
+                await browser.click_relative(rect, float(back[0]), float(back[1]))
+                self.last_form_interruption_back_at = now
+            else:
+                print("[state] 挂单被订单详情打断，等待返回后检查订单状态。")
+            return True
+        if self.is_waiting_transfer(image, boxes) and not self.is_orders_page(image, boxes):
             if self.is_waiting_transfer_detail(image, boxes):
                 if now - self.last_waiting_transfer_back_at >= 1.5:
                     await self.save_action_debug(image, boxes, "waiting_transfer_back")
@@ -1070,14 +1485,21 @@ class CanvasBot:
                     self.post_accept_order_check_until = now + 10.0
                 return True
             print("[state] 订单待付款，等待买家转账。")
+            self.accept_confirm_until = 0
             return True
         active_order = self.find_active_order_anchor(image, boxes)
-        if active_order:
+        if active_order and not self.multi_order_enabled():
             label = active_order.text if isinstance(active_order, TextBox) else active_order.name
             print(f"[state] 订单页存在进行中订单：{label}")
             return True
         if self.accept_confirm_until > now:
-            await self.click_safe_confirm(browser, rect, image, boxes)
+            target = self.find_accept_confirm_target(image, boxes)
+            if target:
+                self.record_action("识别到接单二次确认，点击确认")
+                await self.click_visual_target(browser, rect, target)
+                self.accept_confirm_until = 0
+            else:
+                print("[state] 等待接单二次确认或订单状态更新。")
             return True
 
         if not self.cfg.get("auto_accept", True):
@@ -1106,9 +1528,29 @@ class CanvasBot:
         self.last_accept_at = now
         self.pending_since = 0
         await self.click_visual_target(browser, rect, target)
-        await asyncio.sleep(0.35)
         self.accept_confirm_until = time.time() + 6
-        await self.click_safe_confirm(browser, rect, image, boxes)
+        return True
+
+    async def handle_order_exception_dialog(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Dismiss the timeout reminder without opening its detail page."""
+        target = self.find_order_exception_ignore(image, boxes)
+        if not target:
+            await self.save_action_debug(image, boxes, "order_exception_ignore_not_found")
+            print("[warn] 识别到订单异常提醒，但未找到忽略按钮，不点击立即查看。")
+            return True
+        now = time.time()
+        if now - self.last_exception_ignore_at < 0.8 or not self.can_act():
+            return True
+        await self.save_action_debug(image, boxes, "order_exception_ignore")
+        self.record_action("订单异常提醒，按文字点击忽略")
+        self.last_exception_ignore_at = now
+        await self.click_visual_target(browser, rect, target)
         return True
 
     async def handle_post_accept_order_check(
@@ -1130,6 +1572,19 @@ class CanvasBot:
             return True
 
         if self.post_accept_order_check == "open":
+            # After accepting, Flutter may navigate straight to 出售详情 rather than
+            # back to the tabbed main page. Leave that detail page first; the order
+            # tab does not exist there, so waiting for it would otherwise time out.
+            if self.is_order_detail_interrupt_page(image, boxes):
+                if now - self.last_post_accept_detail_back_at >= 1.5:
+                    await self.save_action_debug(image, boxes, "post_accept_detail_back")
+                    self.record_action("接单后在订单详情，点击左上角返回订单列表")
+                    back = self.points.get("order_detail_back", [0.08, 0.04])
+                    await browser.click_relative(rect, float(back[0]), float(back[1]))
+                    self.last_post_accept_detail_back_at = now
+                else:
+                    print("[state] 接单后订单详情正在返回，等待订单页标签出现。")
+                return True
             target = self.find_order_page_tab(image, boxes)
             if not target:
                 print("[state] 等待订单页标签出现。")
@@ -1229,6 +1684,49 @@ class CanvasBot:
         print(f"[warn] 未在{label}输入框确认数值 {value}，停止本次挂单。")
         return False
 
+    async def fill_canvas_all_balance(self, browser: BrowserSession, expected_amount: str) -> bool:
+        """Use the form's 全部 control so the app supplies a fractional remaining balance."""
+        rect, image, boxes = await self.scan_app(browser)
+        field = self.resolve_canvas_field_target(
+            image,
+            boxes,
+            self.texts.get("amount_label", ["变现金额", "出售金额"]),
+            0.50,
+        )
+        if not field:
+            await self.save_action_debug(image, boxes, "amount_all_target_not_found")
+            print("[warn] 未识别变现金额输入框，不点击全部。")
+            return False
+        width, height = image.size
+        target = self.vision.find_text(
+            boxes,
+            ["全部"],
+            prefer_right=True,
+            max_text_length=8,
+            bounds=(width * 0.72, field[1] - height * 0.09, width * 0.98, field[1] + height * 0.09),
+        )
+        if not target:
+            await self.save_action_debug(image, boxes, "amount_all_not_found")
+            print("[warn] 未识别变现金额的全部按钮，不执行坐标点击。")
+            return False
+        self.record_action("余额不足配置金额，点击变现金额全部")
+        await self.click_visual_target(browser, rect, target)
+        await asyncio.sleep(0.28)
+        _, verify_image, verify_boxes = await self.scan_app(browser)
+        if self.is_field_value_visible(verify_boxes, expected_amount, field, verify_image):
+            print(f"[state] 已确认变现金额全部显示为 {expected_amount}")
+            return True
+        try:
+            rounded_amount = self.decimal_text(Decimal(str(expected_amount)).to_integral_value(rounding=ROUND_DOWN))
+        except InvalidOperation:
+            rounded_amount = ""
+        if rounded_amount and self.is_field_value_visible(verify_boxes, rounded_amount, field, verify_image):
+            print(f"[state] 页面将全部金额取整为 {rounded_amount}，继续填写限额")
+            return True
+        await self.save_action_debug(verify_image, verify_boxes, "amount_all_not_verified")
+        print(f"[warn] 点击全部后未确认变现金额 {expected_amount}，停止本次挂单。")
+        return False
+
     async def type_password_with_keypad(self, browser: BrowserSession, rect: Rect, password: str) -> None:
         keypad = self.points.get("keypad", {})
         for digit in str(password):
@@ -1266,10 +1764,13 @@ class CanvasBot:
         if self.payment_selected_for_form:
             return True
 
-        payment = self.cfg.get("payment", {})
         rect, image, boxes = await self.scan_app(browser)
-        keyword = str(payment.get("keyword") or "").strip()
+        payment = self.cfg.get("payment", {})
+        keyword = self.current_payment_keyword() or str(payment.get("keyword") or "").strip()
         attempts = int(clamp(float(payment.get("ocr_attempts", 8)), 1, 16))
+        if not keyword:
+            print("[warn] 未配置收款卡片关键词，停止本次挂单。")
+            return False
 
         # 当前页面的收款卡直接位于变现表单内。先取消默认选中的第一张卡，
         # 再用目标文字定位卡片；只有没有表单卡时才兼容独立选择页版本。
@@ -1315,6 +1816,7 @@ class CanvasBot:
         await browser.click_abs(rect.left + x, rect.top + y)
 
     async def submit_canvas_order_form(self, browser: BrowserSession, rect: Rect) -> bool:
+        self.form_interrupted_by_trade_notification = False
         rect, image, boxes = await self.scan_app(browser)
         submit = self.find_bottom_action_target(image, boxes, self.texts.get("submit", []))
         if not submit:
@@ -1332,9 +1834,12 @@ class CanvasBot:
         await asyncio.sleep(cfg["password_delay_sec"])
         password_scan = await self.wait_for_visual_state(browser, "password", cfg["password_timeout_sec"])
         if not password_scan:
+            if self.form_interrupted_by_trade_notification:
+                print("[state] 挂单等待被交易通知打断，转入来单处理。")
+                return True
             return False
 
-        password = self.password()
+        password = await self.resolve_payment_password()
         if password:
             password_cfg = self.password_cfg()
             mode = password_cfg.get("input_mode", "keyboard")
@@ -1361,12 +1866,27 @@ class CanvasBot:
             return False
 
         if not await self.wait_for_visual_state(browser, "start", cfg["return_to_start_timeout_sec"]):
+            if self.form_interrupted_by_trade_notification:
+                print("[state] 挂单返回等待被交易通知打断，转入来单处理。")
+                return True
             return False
 
-        self.pending_since = time.time()
+        submitted_at = time.time()
+        if self.multi_order_enabled():
+            self.multi_pending_since.append(submitted_at)
+            self.multi_payment_index += 1
+            self.multi_batch_complete = False
+            self.multi_cancel_scroll_steps = 0
+            self.multi_cancel_recovering = False
+            self.form_values = {}
+            self.pending_since = 0
+            self.record_action("多挂单已提交，返回搬砖页继续检查余额")
+        else:
+            self.pending_since = submitted_at
         self.form_expected_after = 0
         self.form_expected_until = 0
-        self.record_action("页面已返回开始搬砖，挂单完成，等待来单")
+        if not self.multi_order_enabled():
+            self.record_action("页面已返回开始搬砖，挂单完成，等待来单")
         return True
 
     async def confirm_password_if_still_visible(self, browser: BrowserSession) -> bool:
@@ -1445,18 +1965,24 @@ class CanvasBot:
             return True
         self.last_form_submit_at = now
 
-        amount = str(self.cfg.get("amount") or "").strip()
+        values = self.form_values if self.multi_order_enabled() else {}
+        amount = values.get("amount") or str(self.cfg.get("amount") or "").strip()
         if not amount:
             print("[warn] 请先在 configs/qjd67.json 填写 amount。")
             return True
 
-        if not await self.fill_canvas_text_field(
-            browser,
-            "变现金额",
-            self.texts.get("amount_label", ["变现金额", "出售金额"]),
-            0.50,
-            amount,
-        ):
+        fill_amount = (
+            self.fill_canvas_all_balance(browser, amount)
+            if values.get("use_all_balance") == "true"
+            else self.fill_canvas_text_field(
+                browser,
+                "变现金额",
+                self.texts.get("amount_label", ["变现金额", "出售金额"]),
+                0.50,
+                amount,
+            )
+        )
+        if not await fill_amount:
             self.form_submission_failed = True
             return True
         if not await self.fill_canvas_text_field(
@@ -1464,7 +1990,7 @@ class CanvasBot:
             "最小限额",
             self.texts.get("limit_label", ["单笔限额"]),
             0.26,
-            str(self.cfg.get("limit_min") or ""),
+            values.get("limit_min") or str(self.cfg.get("limit_min") or ""),
         ):
             self.form_submission_failed = True
             return True
@@ -1473,7 +1999,7 @@ class CanvasBot:
             "最大限额",
             self.texts.get("limit_label", ["单笔限额"]),
             0.74,
-            str(self.cfg.get("limit_max") or ""),
+            values.get("limit_max") or str(self.cfg.get("limit_max") or ""),
         ):
             self.form_submission_failed = True
             return True
@@ -1497,14 +2023,47 @@ class CanvasBot:
         if not self.can_act():
             return True
 
-        target = self.vision.find_template(image, "cancel") or self.vision.find_text(
-            boxes,
-            self.texts.get("cancel", []),
-            prefer_right=True,
-            prefer_bottom=True,
-            max_text_length=16,
-            exclude=self.texts.get("done", []),
-        )
+        is_multi = self.multi_order_enabled()
+        target: TextBox | TemplateMatch | None = self.find_bottom_cancel_target(image, boxes) if is_multi else self.vision.find_template(image, "cancel")
+        if is_multi:
+            if not target and self.multi_cancel_scroll_steps and not self.multi_cancel_recovering:
+                self.record_action("未找到进行中订单，向上回滚取消列表")
+                await browser.wheel_relative(rect, 0.50, 0.66, -360)
+                self.multi_cancel_recovering = True
+                return True
+            if target and not self.multi_cancel_recovering:
+                _, target_y = target.center
+                # A card near the middle usually has older active cards below it.
+                # Stop as soon as a completed/cancelled row appears below it: that
+                # is the boundary before historical orders, not another active card.
+                history_below = self.has_terminal_history_below(target, boxes)
+                if target_y < image.height * 0.72 and self.multi_cancel_scroll_steps < 4 and not history_below:
+                    self.record_action(f"按先进先出向下查找最尾部订单 {self.multi_cancel_scroll_steps + 1}/4")
+                    await browser.wheel_relative(rect, 0.50, 0.66, 360)
+                    self.multi_cancel_scroll_steps += 1
+                    return True
+            if self.multi_cancel_recovering:
+                self.multi_cancel_recovering = False
+        anchor = self.find_pending_anchor(image, boxes)
+        if not target and isinstance(anchor, TextBox) and not text_has_any(anchor.text, self.texts.get("cancel", [])):
+            _, height = image.size
+            target = self.vision.find_text(
+                boxes,
+                self.texts.get("cancel", []),
+                prefer_right=True,
+                max_text_length=16,
+                exclude=self.texts.get("done", []),
+                bounds=(0, max(0, anchor.top - height * 0.09), image.width, min(height, anchor.bottom + height * 0.09)),
+            )
+        if not target:
+            target = self.find_bottom_cancel_target(image, boxes) if is_multi else self.vision.find_text(
+                boxes,
+                self.texts.get("cancel", []),
+                prefer_right=True,
+                prefer_bottom=True,
+                max_text_length=16,
+                exclude=self.texts.get("done", []),
+            )
         if not target:
             await self.save_action_debug(image, boxes, "cancel_not_found")
             print("[warn] 未识别取消按钮，不执行坐标点击。")
@@ -1514,9 +2073,12 @@ class CanvasBot:
         self.cancel_clicked_at = now
         self.last_cancel_confirm_at = 0
         self.cancel_confirm_clicks = 0
-        self.record_action("按文字点击取消挂单")
+        self.record_action("按先进先出点击最底部取消挂单" if is_multi else "按文字点击取消挂单")
         await self.click_visual_target(browser, rect, target)
         self.cancel_confirm_until = time.time() + self.cancel_flow_cfg()["confirm_timeout_sec"]
+        self.cancelling_multi_order = is_multi and bool(self.multi_pending_since)
+        if is_multi:
+            self.multi_cancel_scroll_steps = 0
         self.pending_since = 0
         return True
 
@@ -1557,6 +2119,14 @@ class CanvasBot:
         self.last_cancel_confirm_at = now
         self.cancel_confirm_until = 0
         self.next_post_after = now + 1.4
+        if self.cancelling_multi_order:
+            if self.multi_pending_since:
+                self.multi_pending_since.pop(0)
+            self.multi_batch_complete = False
+            self.cancelling_multi_order = False
+            self.multi_cancel_scroll_steps = 0
+            self.multi_cancel_recovering = False
+            print("[state] 已取消一笔超时挂单，等待余额恢复后补挂。")
         return True
 
     async def start_order_flow(
@@ -1571,6 +2141,15 @@ class CanvasBot:
             return True
         if not self.can_act():
             return True
+
+        if self.multi_order_enabled():
+            balance = self.find_available_balance(image, boxes)
+            if balance is None:
+                await self.save_action_debug(image, boxes, "balance_not_found")
+                print("[warn] 未识别顶部搬砖余额，不新增挂单。")
+                return True
+            if not self.prepare_multi_order_values(balance):
+                return True
 
         target = self.find_start_order_target(image, boxes)
         if not target:
@@ -1607,6 +2186,8 @@ class CanvasBot:
                 return await self.handle_cancel_confirm_dialog(browser, rect, image, boxes)
             print("[state] 取消确认等待超时，跳过本轮重挂")
             self.cancel_confirm_until = 0
+            self.multi_cancel_scroll_steps = 0
+            self.multi_cancel_recovering = False
             self.next_post_after = now + 1.4
             return True
 
@@ -1630,6 +2211,9 @@ class CanvasBot:
                 print("[state] 本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
                 return True
             return await self.fill_and_submit_canvas_order_form(browser, rect)
+
+        if self.multi_order_enabled():
+            return await self.handle_multi_order_workflow(browser, rect, image, boxes)
 
         anchor = self.find_pending_anchor(image, boxes)
         if self.clear_stale_pending_if_missing(anchor, boxes):
@@ -1656,6 +2240,149 @@ class CanvasBot:
         self.pending_since = 0
         return await self.start_order_flow(browser, rect, image, boxes)
 
+    async def handle_multi_order_workflow(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Post until balance is depleted, then use the existing visual cancel chain for timeouts."""
+        if self.is_empty_orders_page(image, boxes):
+            return await self.return_from_empty_orders_page(browser, rect, image, boxes)
+
+        pending = self.find_pending_anchor(image, boxes)
+        pending_count = self.count_pending_orders(boxes)
+
+        if pending_count and not self.multi_pending_since and self.multi_order_cfg().get("adopt_existing_pending_orders", False):
+            self.multi_pending_since = [time.time()] * pending_count
+            print(f"[state] 已接管启动前已有的 {pending_count} 笔挂单，从本次启动开始重新计时。")
+
+        balance = self.find_available_balance(image, boxes)
+        if balance is None:
+            await self.save_action_debug(image, boxes, "balance_not_found")
+            print("[warn] 未识别顶部搬砖余额，不新增挂单。")
+            return True
+        minimum_remaining = Decimal(str(self.cfg.get("limit_min") or "0"))
+        if pending_count == 0 and self.multi_pending_since:
+            if balance >= minimum_remaining:
+                self.multi_pending_since.clear()
+                print("[state] 余额已恢复且未检测到待接单订单，清除手动取消后的本地计时。")
+            else:
+                print("[state] 当前视图未识别待接单订单，但余额未恢复，保留本地计时。")
+        if balance >= minimum_remaining:
+            if self.multi_batch_complete:
+                print(f"[state] 搬砖余额恢复为 {self.decimal_text(balance)}，继续新增挂单。")
+            self.multi_batch_complete = False
+            return await self.start_order_flow(browser, rect, image, boxes)
+
+        if not self.multi_batch_complete:
+            return await self.start_order_flow(browser, rect, image, boxes)
+
+        if not pending:
+            # We may have just moved below the active cards into completed/cancelled
+            # history. Recover one small step instead of treating that history as
+            # proof that the timed order disappeared.
+            if self.multi_pending_since and getattr(self, "multi_cancel_scroll_steps", 0):
+                age = int(time.time() - self.multi_pending_since[0])
+                repost_delay = int(self.cfg.get("repost_delay_sec", 30))
+                if self.cfg.get("auto_repost", True) and age >= repost_delay:
+                    print("[state] 已滚入历史订单区，向上回找超时挂单。")
+                    return await self.cancel_pending_order(browser, rect, image, boxes)
+            print("[state] 多挂单批次已完成，余额不足阈值，停止新增挂单。")
+            return True
+
+        if not self.multi_pending_since:
+            print("[state] 检测到已有挂单，但本次启动未创建它们，不按本地计时自动取消。")
+            return True
+
+        age = int(time.time() - self.multi_pending_since[0])
+        repost_delay = int(self.cfg.get("repost_delay_sec", 30))
+        print(f"[state] 多挂单已停止新增，最早一笔等待 {age}/{repost_delay}s，共跟踪 {len(self.multi_pending_since)} 笔。")
+        if self.cfg.get("auto_repost", True) and age >= repost_delay:
+            return await self.cancel_pending_order(browser, rect, image, boxes)
+        return True
+
+    async def return_from_empty_orders_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """An explicitly empty order page is safe to leave and resume from 搬砖."""
+        target = self.find_move_page_tab(image, boxes)
+        if not target:
+            print("[state] 订单页已空，等待搬砖标签出现。")
+            return True
+        await self.save_action_debug(image, boxes, "empty_order_return_move")
+        self.record_action("订单页无进行中订单，返回搬砖页继续挂单")
+        await self.click_visual_target(browser, rect, target)
+        self.multi_pending_since.clear()
+        self.multi_batch_complete = False
+        self.move_page_opened = True
+        return True
+
+    async def handle_orders_list_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Observe an orders list; posting is intentionally never started from this page."""
+        if self.is_empty_orders_page(image, boxes):
+            return await self.return_from_empty_orders_page(browser, rect, image, boxes)
+        if await self.maybe_pull_refresh_orders(browser, rect, image, boxes):
+            return True
+        active = self.find_active_order_anchor(image, boxes)
+        if active:
+            label = active.text if isinstance(active, TextBox) else active.name
+            print(f"[state] 订单列表存在进行中订单：{label}")
+            return True
+        print("[state] 订单列表仍在加载，等待明确的订单或空状态。")
+        return True
+
+    async def maybe_pull_refresh_orders(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Refresh the orders list once per minute without interacting with an order row."""
+        now = time.time()
+        if now - self.last_orders_refresh_at < 60:
+            return False
+        self.last_orders_refresh_at = now
+        await self.save_action_debug(image, boxes, "orders_pull_refresh")
+        self.record_action("订单页每分钟下拉刷新")
+        # Start below the status tabs and above the bottom navigation. The gesture
+        # lands in empty list content even when a single order card is visible.
+        await browser.drag_relative(rect, 0.50, 0.42, 0.50, 0.70)
+        await asyncio.sleep(0.45)
+        return True
+
+    async def handle_withdraw_form_page(self, browser: BrowserSession, rect: Rect) -> bool:
+        """Only the withdraw form handler may type form values or submit a new order."""
+        if self.form_submission_failed:
+            print("[state] 变现表单上次视觉校验失败，等待你手动修改或离开页面。")
+            return True
+        return await self.fill_and_submit_canvas_order_form(browser, rect)
+
+    async def open_move_page(self, browser: BrowserSession, rect: Rect, image: Image.Image, boxes: list[TextBox]) -> bool:
+        target = self.find_move_page_tab(image, boxes)
+        if not target:
+            print("[state] 未检测到搬砖标签，等待页面加载。")
+            return True
+        if not self.can_act():
+            return True
+        await self.save_action_debug(image, boxes, "move_page_tab")
+        self.record_action("按文字点击顶部搬砖页面")
+        await self.click_visual_target(browser, rect, target)
+        self.move_page_opened = True
+        return True
+
     async def tick(self, browser: BrowserSession) -> None:
         rect = await browser.app_rect()
         image = await browser.screenshot_app(rect)
@@ -1666,16 +2393,24 @@ class CanvasBot:
 
         print(f"[scan] app={rect.source} {rect.width:.0f}x{rect.height:.0f} ocr={len(boxes)}")
 
-        if not self.move_page_opened:
-            move_tab = self.find_move_page_tab(image, boxes)
-            if not move_tab:
-                await self.save_action_debug(image, boxes, "move_page_tab_not_found")
-                print("[state] 未检测到搬砖标签，等待页面加载。")
-                return
-            await self.save_action_debug(image, boxes, "move_page_tab")
-            self.record_action("按文字点击顶部搬砖页面")
-            await self.click_visual_target(browser, rect, move_tab)
-            self.move_page_opened = True
+        page = self.classify_visual_page(image, boxes)
+        self.note_visual_page(page)
+
+        # A manual navigation away from a failed form is an explicit recovery.
+        # Forget the stale failure, then let the handler for the new page decide.
+        if page != "withdraw_form" and self.form_submission_failed:
+            self.form_submission_failed = False
+            self.form_expected_after = 0
+            self.form_expected_until = 0
+            self.form_values = {}
+            print("[state] 已离开失败的变现表单，恢复按当前页面识别。")
+
+        if page == "trade_notification":
+            await self.handle_incoming_order(browser, rect, image, boxes)
+            return
+
+        if page == "order_exception_dialog":
+            await self.handle_order_exception_dialog(browser, rect, image, boxes)
             return
 
         if await self.handle_post_accept_order_check(browser, rect, image, boxes):
@@ -1683,7 +2418,30 @@ class CanvasBot:
 
         if await self.handle_incoming_order(browser, rect, image, boxes):
             return
-        await self.handle_order_workflow(browser, rect, image, boxes)
+
+        if page == "cancel_confirm_dialog":
+            return await self.handle_cancel_confirm_dialog(browser, rect, image, boxes)
+        if page == "password_dialog":
+            print("[state] 支付密码弹窗可见，等待当前提交流程完成。")
+            return
+        if page == "withdraw_form":
+            self.move_page_opened = True
+            return await self.handle_withdraw_form_page(browser, rect)
+        if page in {"orders_empty", "orders_list"}:
+            return await self.handle_orders_list_page(browser, rect, image, boxes)
+        if page == "move_page":
+            self.move_page_opened = True
+            return await self.handle_order_workflow(browser, rect, image, boxes)
+        if page in {"waiting_transfer", "waiting_transfer_detail", "order_detail"}:
+            print("[state] 订单详情正在加载，等待订单状态文字出现。")
+            return
+        if page == "navigation":
+            return await self.open_move_page(browser, rect, image, boxes)
+
+        if self.form_expected_until and time.time() <= self.form_expected_until:
+            print("[state] 等待变现页面加载。")
+            return
+        print("[state] 未识别当前页面，不执行任何表单或订单操作。")
 
     async def run(self) -> None:
         async with BrowserSession(self.cfg) as browser:
@@ -1803,6 +2561,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     }.items():
         subparser = subparsers.add_parser(name, help=help_text)
         subparser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    dashboard_parser = subparsers.add_parser("dashboard", help="Open the local configuration dashboard.")
+    dashboard_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="Local bind host.")
+    dashboard_parser.add_argument("--port", type=int, default=8765, help="Local bind port.")
     return parser.parse_args(argv)
 
 
@@ -1821,6 +2583,11 @@ async def async_main(argv: list[str]) -> int:
         return 0
     if args.command == "run":
         await CanvasBot(cfg).run()
+        return 0
+    if args.command == "dashboard":
+        from .dashboard import run_dashboard
+
+        run_dashboard(cfg_path, host=args.host, port=args.port)
         return 0
     raise AssertionError(f"Unknown command: {args.command}")
 
