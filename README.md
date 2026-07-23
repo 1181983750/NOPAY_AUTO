@@ -2,6 +2,11 @@
 
 这个版本不再依赖页面 DOM 文字。它用 Python + Playwright 控制 Chrome，对 Flutter/canvas 区域截图，再通过 OCR、模板图或比例坐标决定点击哪里。
 
+完整文档：
+
+- [使用与启动说明](docs/使用与启动说明.md)
+- [功能模块说明](docs/功能模块说明.md)
+
 ## 安装
 
 ```powershell
