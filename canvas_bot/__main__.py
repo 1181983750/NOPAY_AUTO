@@ -633,6 +633,16 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         await self.page.keyboard.insert_text(str(text))
 
+    async def replace_numeric(self, text: str) -> None:
+        """Enter numeric Flutter canvas fields with key events, not text injection."""
+        assert self.page is not None
+        await self.page.keyboard.press("Control+A")
+        await self.page.keyboard.press("Backspace")
+        for char in str(text):
+            if char.isdigit() or char == ".":
+                await self.page.keyboard.press(char)
+                await asyncio.sleep(0.04)
+
     async def press(self, key: str) -> None:
         assert self.page is not None
         await self.page.keyboard.press(key)
@@ -1771,7 +1781,7 @@ class CanvasBot:
         self.record_action(f"按文字定位填写{label}")
         await browser.click_abs(rect.left + x, rect.top + y)
         await asyncio.sleep(0.16)
-        await browser.replace_text(str(value))
+        await browser.replace_numeric(str(value))
         await asyncio.sleep(0.28)
 
         _, verify_image, verify_boxes = await self.scan_app(browser)
