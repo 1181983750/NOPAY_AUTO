@@ -2658,7 +2658,6 @@ class CanvasBot:
         async with BrowserSession(self.cfg) as browser:
             print(f"[boot] OCR: {self.vision.ocr_name}")
             print("[boot] Browser ready. Press Ctrl+C to stop.")
-            await self.notify_once("started", "脚本已启动", f"OCR：{self.vision.ocr_name}")
             while True:
                 try:
                     await self.tick(browser)
