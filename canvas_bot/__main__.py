@@ -2594,11 +2594,9 @@ class CanvasBot:
         self.note_visual_page(page)
 
         if page == "trade_notification":
-            await self.notify_once("trade_notification", "NO钱包：收到交易通知", "检测到新的交易通知，请及时处理。")
+            await self.notify_once("trade_notification", "收到交易通知，请及时处理", "")
         elif page == "order_exception_dialog":
-            await self.notify_once("order_exception", "NO钱包：订单异常", "检测到订单异常提醒，请及时检查。")
-        elif page in {"waiting_transfer", "waiting_transfer_detail"}:
-            await self.notify_once("waiting_transfer", "NO钱包：待付款", "订单已进入待付款状态，请留意买家转账。")
+            await self.notify_once("order_exception", "订单异常，请及时检查", "")
 
         if page == "unknown":
             await self.handle_unknown_page(browser, rect, image, boxes)
@@ -2658,7 +2656,6 @@ class CanvasBot:
         async with BrowserSession(self.cfg) as browser:
             print(f"[boot] OCR: {self.vision.ocr_name}")
             print("[boot] Browser ready. Press Ctrl+C to stop.")
-            await self.notify_once("started", "NO钱包：脚本已启动", f"OCR：{self.vision.ocr_name}")
             while True:
                 try:
                     await self.tick(browser)
