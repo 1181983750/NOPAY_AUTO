@@ -679,6 +679,7 @@ class CanvasBot:
         self.last_orders_refresh_at = 0.0
         self.unknown_page_streak = 0
         self.last_unknown_page_reload_at = 0.0
+        self.last_password_input_at = 0.0
 
     async def notify_once(self, event: str, title: str, content: str) -> None:
         """Send one notification per event per run; notification failures never stop the bot."""
@@ -1858,6 +1859,40 @@ class CanvasBot:
             await asyncio.sleep(0.08)
         return True
 
+    async def handle_runtime_password_dialog(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Allow a password entered in the dashboard after the dialog appeared."""
+        now = time.time()
+        if now - self.last_password_input_at < 3.0:
+            return False
+        password = await self.resolve_payment_password()
+        if not password:
+            print("[state] 支付密码弹窗可见，等待控制台输入支付密码。")
+            return False
+
+        self.last_password_input_at = now
+        password_cfg = self.password_cfg()
+        mode = password_cfg.get("input_mode", "keyboard")
+        self.record_action("检测到运行中支付密码，输入支付密码")
+        if mode == "keypad":
+            await self.type_password_with_keypad(browser, rect, password)
+            entered = True
+        else:
+            entered = await self.type_password_with_keyboard(browser, rect, password, image, boxes)
+        if not entered:
+            return False
+        await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
+        if password_cfg.get("confirm_after_input", False):
+            await self.confirm_password_if_still_visible(browser)
+        else:
+            print("[state] 运行中支付密码输入完成，等待页面自动返回。")
+        return True
+
     async def select_canvas_payment_card(self, browser: BrowserSession, rect: Rect) -> bool:
         if self.payment_selected_for_form:
             return True
@@ -2577,7 +2612,7 @@ class CanvasBot:
         if page == "cancel_confirm_dialog":
             return await self.handle_cancel_confirm_dialog(browser, rect, image, boxes)
         if page == "password_dialog":
-            print("[state] 支付密码弹窗可见，等待当前提交流程完成。")
+            await self.handle_runtime_password_dialog(browser, rect, image, boxes)
             return
         if page == "auth_page":
             print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
