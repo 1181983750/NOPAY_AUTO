@@ -386,7 +386,15 @@ class BrowserSession:
                 ) from exc
             raise
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        await self.page.goto(self.cfg["url"], wait_until="domcontentloaded")
+        # Some versions of the target page keep requests open indefinitely, so
+        # waiting for DOMContentLoaded can leave a blank browser after the
+        # default Playwright navigation timeout. The canvas selector below is
+        # the meaningful readiness check for this bot.
+        await self.page.goto(
+            self.cfg["url"],
+            wait_until="commit",
+            timeout=int(float(self.cfg.get("navigation_timeout_sec", 30)) * 1000),
+        )
         await self.page.wait_for_timeout(int(float(self.cfg.get("startup_wait_sec", 3)) * 1000))
         try:
             await self.page.wait_for_selector(
@@ -1028,6 +1036,17 @@ class CanvasBot:
         )
         return bool(order_tab and state_tab)
 
+    def is_auth_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Recognize the site's login/register screen and wait for manual login."""
+        width, height = image.size
+        auth_terms = self.vision.find_text(
+            boxes,
+            ["注册", "登录", "请输入手机号", "请输入验证码", "手机号"],
+            max_text_length=24,
+            bounds=(width * 0.20, height * 0.10, width * 0.90, height * 0.90),
+        )
+        return bool(auth_terms)
+
     def classify_visual_page(self, image: Image.Image, boxes: list[TextBox]) -> str:
         """Classify the visible Flutter page before deciding which actions are allowed."""
         if self.find_trade_notification(image, boxes):
@@ -1043,6 +1062,8 @@ class CanvasBot:
         # full-screen 出售详情 waiting page.
         if self.is_empty_orders_page(image, boxes):
             return "orders_empty"
+        if self.is_auth_page(image, boxes):
+            return "auth_page"
         if self.is_orders_page(image, boxes):
             return "orders_list"
         if self.is_waiting_transfer_detail(image, boxes):
@@ -1076,6 +1097,7 @@ class CanvasBot:
             "orders_list": "订单列表",
             "move_page": "搬砖页",
             "navigation": "导航页",
+            "auth_page": "登录/注册页",
             "unknown": "未知/加载页",
         }
         print(f"[page] 当前页面：{labels.get(page, page)}")
@@ -2457,6 +2479,16 @@ class CanvasBot:
         print(f"[scan] app={rect.source} {rect.width:.0f}x{rect.height:.0f} ocr={len(boxes)}")
 
         page = self.classify_visual_page(image, boxes)
+        # OCR may be unavailable during first-run setup. The auth screen still
+        # exposes a stable URL/DOM hint, so do not treat it as an unknown page.
+        if page == "unknown" and not boxes:
+            try:
+                diag = await browser.diagnostics()
+                auth_hint = f"{diag.get('url', '')} {diag.get('bodyText', '')}".lower()
+                if "loginpage" in auth_hint or any(term in auth_hint for term in ("登录", "注册", "手机号")):
+                    page = "auth_page"
+            except Exception:
+                pass
         self.note_visual_page(page)
 
         if page == "unknown":
@@ -2491,6 +2523,9 @@ class CanvasBot:
             return await self.handle_cancel_confirm_dialog(browser, rect, image, boxes)
         if page == "password_dialog":
             print("[state] 支付密码弹窗可见，等待当前提交流程完成。")
+            return
+        if page == "auth_page":
+            print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
             return
         if page == "withdraw_form":
             self.move_page_opened = True

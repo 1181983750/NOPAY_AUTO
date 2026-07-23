@@ -226,6 +226,12 @@ class DashboardState:
         with self.lock:
             if self.running():
                 return False, "脚本已经由本控制台启动。"
+            # A crashed or naturally exited child can leave the redirected log
+            # handle open. Windows then refuses to remove the old log on the
+            # next start, so close the stale handle before cleanup.
+            if self.process_log:
+                self.process_log.close()
+                self.process_log = None
             self.clear_previous_run_artifacts()
             self.process_log = self.log_path.open("w", encoding="utf-8", buffering=1)
             self.process_log.write(f"[dashboard] started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
