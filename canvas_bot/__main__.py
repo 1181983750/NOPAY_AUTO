@@ -89,6 +89,14 @@ class PushPlusNotifier:
 
     def __init__(self) -> None:
         self.token = str(os.getenv("QJD67_PUSHPLUS_TOKEN") or "").strip()
+        if not self.token and os.name == "nt":
+            try:
+                import winreg
+
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                    self.token = str(winreg.QueryValueEx(key, "QJD67_PUSHPLUS_TOKEN")[0] or "").strip()
+            except (FileNotFoundError, OSError):
+                pass
 
     @property
     def enabled(self) -> bool:
@@ -1533,6 +1541,7 @@ class CanvasBot:
         now = time.time()
         notification = self.find_trade_notification(image, boxes)
         if notification:
+            await self.notify_once("trade_notification", "NO钱包：收到交易通知", "检测到新的交易通知，请及时处理。")
             if not self.cfg.get("auto_accept", True):
                 print("[state] 检测到交易通知，自动接单已关闭。")
                 return True
