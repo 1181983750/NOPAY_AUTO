@@ -539,6 +539,29 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertEqual(bot.classify_visual_page(image, boxes), "move_page")
 
+    def test_page_classifier_identifies_withdraw_page_below_platform_minimum(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "texts": {
+                "balance": ["搬砖余额"],
+                "amount": ["变现金额"],
+                "submit": ["确认变现"],
+                "limit": ["单笔限额"],
+            }
+        }
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [
+            TextBox("变现", 0.99, 220, 10, 285, 55),
+            TextBox("搬砖余额", 0.99, 30, 125, 150, 158),
+            TextBox("0.4", 0.99, 170, 125, 215, 158),
+            TextBox("您的可变现余额不足10", 0.99, 160, 660, 390, 700),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "withdraw_unavailable")
+
     def test_buyer_detail_interrupt_clears_failed_form_and_returns(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:

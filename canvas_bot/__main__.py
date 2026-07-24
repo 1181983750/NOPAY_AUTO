@@ -684,6 +684,7 @@ class CanvasBot:
         self.form_submission_failed = False
         self.form_interrupted_by_trade_notification = False
         self.last_form_interruption_back_at = 0.0
+        self.last_withdraw_unavailable_back_at = 0.0
         self.accept_confirm_until = 0.0
         self.cancel_confirm_until = 0.0
         self.multi_pending_since: list[float] = []
@@ -698,6 +699,7 @@ class CanvasBot:
         self.unknown_page_streak = 0
         self.last_unknown_page_reload_at = 0.0
         self.last_password_input_at = 0.0
+        self._state_log_times: dict[str, float] = {}
 
     async def notify_once(self, event: str, title: str, content: str) -> None:
         """Send one notification per event per run; notification failures never stop the bot."""
@@ -869,7 +871,10 @@ class CanvasBot:
         if balance < limit_min:
             self.multi_batch_complete = True
             self.form_values = {}
-            print(f"[state] 搬砖余额 {self.decimal_text(balance)} 小于最小限额 {self.decimal_text(limit_min)}，停止新增挂单。")
+            self.record_state(
+                "low_balance_stop",
+                f"搬砖余额 {self.decimal_text(balance)} 小于最小限额 {self.decimal_text(limit_min)}，停止新增挂单。",
+            )
             return False
         amount = min(configured_amount, balance)
         limit_max = Decimal(str(self.cfg.get("limit_max") or amount))
@@ -904,6 +909,16 @@ class CanvasBot:
     def record_action(self, message: str) -> None:
         self.last_action_at = time.time()
         print(f"[action] {message}")
+
+    def record_state(self, key: str, message: str, interval_sec: float = 30.0) -> None:
+        """Throttle repetitive passive state messages without hiding actions or warnings."""
+        now = time.time()
+        state_log_times = getattr(self, "_state_log_times", {})
+        if now - state_log_times.get(key, 0.0) < interval_sec:
+            return
+        state_log_times[key] = now
+        self._state_log_times = state_log_times
+        print(f"[state] {message}")
 
     def all_text(self, boxes: list[TextBox]) -> str:
         return "|".join(box.normalized for box in boxes)
@@ -1115,6 +1130,15 @@ class CanvasBot:
         )
         return bool(order_tab and state_tab)
 
+    def is_withdraw_unavailable_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Recognize the withdraw page that hides its form when balance is below 10."""
+        if self.is_order_form_visible(image, boxes):
+            return False
+        joined = normalize_text("".join(box.text for box in boxes))
+        has_balance = "搬砖余额" in joined or "可变现余额" in joined
+        has_minimum_message = "不足10" in joined or "不足于10" in joined
+        return has_balance and has_minimum_message
+
     def is_auth_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
         """Recognize the site's login/register screen and wait for manual login."""
         width, height = image.size
@@ -1149,6 +1173,8 @@ class CanvasBot:
             return "waiting_transfer_detail"
         if self.is_waiting_transfer(image, boxes):
             return "waiting_transfer"
+        if self.is_withdraw_unavailable_page(image, boxes):
+            return "withdraw_unavailable"
         if self.is_order_form_visible(image, boxes):
             return "withdraw_form"
         if self.is_order_detail_interrupt_page(image, boxes):
@@ -1170,6 +1196,7 @@ class CanvasBot:
             "cancel_confirm_dialog": "取消确认弹窗",
             "waiting_transfer_detail": "待付款订单详情",
             "waiting_transfer": "待付款订单",
+            "withdraw_unavailable": "变现页余额不足10",
             "withdraw_form": "变现表单",
             "orders_empty": "空订单页",
             "order_detail": "订单详情",
@@ -2374,7 +2401,7 @@ class CanvasBot:
                     return True
                 if self.is_order_form_visible(image, boxes):
                     return await self.fill_and_submit_canvas_order_form(browser, rect)
-                print("[state] Playwright 尚未检测到变现页面")
+                self.record_state("form_waiting", "尚未检测到可填写的变现表单。", interval_sec=5.0)
                 return True
             self.form_expected_after = 0
             self.form_expected_until = 0
@@ -2442,7 +2469,7 @@ class CanvasBot:
                 self.multi_pending_since.clear()
                 print("[state] 余额已恢复且未检测到待接单订单，清除手动取消后的本地计时。")
             else:
-                print("[state] 当前视图未识别待接单订单，但余额未恢复，保留本地计时。")
+                self.record_state("no_pending_low_balance", "当前视图未识别待接单订单，但余额未恢复，保留本地计时。")
         if balance >= minimum_remaining:
             if self.multi_batch_complete:
                 print(f"[state] 搬砖余额恢复为 {self.decimal_text(balance)}，继续新增挂单。")
@@ -2462,7 +2489,7 @@ class CanvasBot:
                 if self.cfg.get("auto_repost", True) and age >= repost_delay:
                     print("[state] 已滚入历史订单区，向上回找超时挂单。")
                     return await self.cancel_pending_order(browser, rect, image, boxes)
-            print("[state] 多挂单批次已完成，余额不足阈值，停止新增挂单。")
+            self.record_state("multi_batch_low_balance", "多挂单批次已完成，余额不足阈值，停止新增挂单。")
             return True
 
         if not self.multi_pending_since:
@@ -2542,6 +2569,25 @@ class CanvasBot:
             print("[state] 变现表单上次视觉校验失败，等待你手动修改或离开页面。")
             return True
         return await self.fill_and_submit_canvas_order_form(browser, rect)
+
+    async def handle_withdraw_unavailable_page(self, browser: BrowserSession, rect: Rect) -> bool:
+        """Leave the empty withdraw page so the bot can keep observing the move page."""
+        now = time.time()
+        last_back = getattr(self, "last_withdraw_unavailable_back_at", 0.0)
+        if now - last_back < 2.0 or not self.can_act():
+            return True
+        self.form_expected_after = 0.0
+        self.form_expected_until = 0.0
+        self.form_submission_failed = False
+        self.form_values = {}
+        self.payment_selected_for_form = False
+        self.record_action("变现余额不足10，返回搬砖页等待余额恢复")
+        back = self.points.get("order_detail_back", [0.08, 0.04])
+        await browser.click_relative(rect, float(back[0]), float(back[1]))
+        self.last_withdraw_unavailable_back_at = now
+        self.next_post_after = now + 1.5
+        self.move_page_opened = True
+        return True
 
     async def open_move_page(self, browser: BrowserSession, rect: Rect, image: Image.Image, boxes: list[TextBox]) -> bool:
         target = self.find_move_page_tab(image, boxes)
@@ -2649,6 +2695,8 @@ class CanvasBot:
         if page == "auth_page":
             print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
             return
+        if page == "withdraw_unavailable":
+            return await self.handle_withdraw_unavailable_page(browser, rect)
         if page == "withdraw_form":
             self.move_page_opened = True
             return await self.handle_withdraw_form_page(browser, rect)
