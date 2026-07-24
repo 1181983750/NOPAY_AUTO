@@ -701,11 +701,15 @@ class CanvasBot:
 
     async def notify_once(self, event: str, title: str, content: str) -> None:
         """Send one notification per event per run; notification failures never stop the bot."""
-        if event in self.notified_events or not self.pushplus.enabled:
+        notified_events = getattr(self, "notified_events", None)
+        if notified_events is None:
+            notified_events = self.notified_events = set()
+        notifier = getattr(self, "pushplus", None)
+        if event in notified_events or not notifier or not notifier.enabled:
             return
-        self.notified_events.add(event)
+        notified_events.add(event)
         try:
-            result = await asyncio.to_thread(self.pushplus.send, title, content)
+            result = await asyncio.to_thread(notifier.send, title, content)
             print(f"[notify] PushPlus 已提交：{event} {result[:120]}")
         except Exception as exc:
             print(f"[notify] PushPlus 发送失败：{event} {exc}")
@@ -771,6 +775,14 @@ class CanvasBot:
         except (TypeError, ValueError):
             configured = 40
         return max(1, min(configured, 120))
+
+    def multi_cancel_scroll_step_px(self) -> int:
+        """Use a small, reversible scroll step around the active/history boundary."""
+        try:
+            configured = int(self.multi_order_cfg().get("cancel_search_step_px", 120))
+        except (TypeError, ValueError):
+            configured = 120
+        return max(40, min(configured, 240))
 
     def unknown_page_refresh_cfg(self) -> tuple[int, float]:
         cfg = self.cfg.get("unknown_page_refresh", {})
@@ -2178,9 +2190,10 @@ class CanvasBot:
         is_multi = self.multi_order_enabled()
         target: TextBox | TemplateMatch | None = self.find_bottom_cancel_target(image, boxes) if is_multi else self.vision.find_template(image, "cancel")
         if is_multi:
+            scroll_step = self.multi_cancel_scroll_step_px()
             if not target and self.multi_cancel_scroll_steps:
                 self.record_action("未找到进行中订单，向上回滚取消列表")
-                await browser.wheel_relative(rect, 0.50, 0.66, -360)
+                await browser.wheel_relative(rect, 0.50, 0.66, -scroll_step)
                 self.multi_cancel_scroll_steps -= 1
                 self.multi_cancel_recovering = True
                 return True
@@ -2199,7 +2212,7 @@ class CanvasBot:
                         f"按先进先出继续向下查找最尾部挂单 "
                         f"{self.multi_cancel_scroll_steps + 1}/{max_steps}"
                     )
-                    await browser.wheel_relative(rect, 0.50, 0.66, 360)
+                    await browser.wheel_relative(rect, 0.50, 0.66, scroll_step)
                     self.multi_cancel_scroll_steps += 1
                     self.multi_cancel_recovering = False
                     return True

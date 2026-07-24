@@ -39,20 +39,18 @@
     "return_to_start_timeout_sec": 8.0,
     "state_poll_sec": 0.35
   },
-  "repost_delay_sec": 60.0,
+  "repost_delay_sec": 35.0,
   "auto_make_order": true,
   "auto_repost": true,
   "auto_accept": true,
   "amount": "3000",
-  "limit_min": "1200",
+  "limit_min": "1100",
   "limit_max": "3000",
   "payment": {
     "keyword": "魔仙",
     "keywords": [
       "魔仙",
-      "0.0",
       "句号",
-      "成瘾",
       "锥子",
       "建材",
       "余明宏2"
@@ -67,11 +65,10 @@
     "enabled": true,
     "adopt_existing_pending_orders": true,
     "cancel_search_max_steps": 40,
+    "cancel_search_step_px": 120,
     "payment_keywords": [
       "魔仙",
-      "0.0",
       "句号",
-      "成瘾",
       "锥子",
       "建材",
       "余明宏2"

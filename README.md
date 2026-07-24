@@ -101,13 +101,14 @@ uv run qjd67-canvas-bot dashboard --config configs/qjd67.json
 "multi_order": {
   "enabled": true,
   "cancel_search_max_steps": 40,
+  "cancel_search_step_px": 120,
   "payment_keywords": ["魔仙", "另一张卡"]
 }
 ```
 
 每次成功挂单后，脚本按 `payment_keywords` 顺序循环选择收款卡。它会 OCR 读取顶部“搬砖余额”，单笔金额不超过当前余额；当余额低于配置的 `limit_min`（最小限额）时停止新增挂单。若余额不足配置的变现金额，脚本点击页面的“全部”填写精确余额。只会对本次运行期间创建并计时的挂单进行超时取消，旧挂单不会被盲目取消。
 
-超时取消会向下小步扫描活动订单区，只有在“取消”按钮下方识别到已完成或已取消的历史订单时，才确认它是最早的活动订单并取消。`cancel_search_max_steps` 默认 `40`，达到上限时脚本只保存调试图并暂停，不会猜测取消目标。
+超时取消会向下小步扫描活动订单区，只有在“取消”按钮下方识别到已完成或已取消的历史订单时，才确认它是最早的活动订单并取消。`cancel_search_step_px` 默认 `120`，向下与回滚使用同样步长，避免跨过历史边界；`cancel_search_max_steps` 默认 `40`，达到上限时脚本只保存调试图并暂停，不会猜测取消目标。
 
 如果以后想复用你平时 Chrome 里的登录状态，再把 `mode` 改成 `system`：
 

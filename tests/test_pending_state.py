@@ -234,7 +234,7 @@ class PendingStateTests(unittest.TestCase):
         browser = FakeBrowser()
 
         self.assertTrue(asyncio.run(bot.cancel_pending_order(browser, Rect(0, 0, 506, 900), image, [top_cancel])))
-        self.assertEqual(browser.wheels, [(0.50, 0.66, 360)])
+        self.assertEqual(browser.wheels, [(0.50, 0.66, 120)])
         self.assertEqual(bot.multi_cancel_scroll_steps, 1)
 
     def test_multi_order_tail_scan_does_not_stop_after_four_visible_cards(self) -> None:
@@ -263,7 +263,7 @@ class PendingStateTests(unittest.TestCase):
         visible_active_cancel = TextBox("取消", 0.99, 420, 720, 480, 750)
 
         self.assertTrue(asyncio.run(bot.cancel_pending_order(browser, Rect(0, 0, 506, 900), image, [visible_active_cancel])))
-        self.assertEqual(browser.wheels, [(0.50, 0.66, 360)])
+        self.assertEqual(browser.wheels, [(0.50, 0.66, 120)])
         self.assertEqual(bot.multi_cancel_scroll_steps, 5)
 
     def test_terminal_history_below_cancel_stops_multi_order_scrolling(self) -> None:
@@ -309,7 +309,7 @@ class PendingStateTests(unittest.TestCase):
         browser = FakeBrowser()
 
         self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(browser, Rect(0, 0, 506, 900), image, boxes)))
-        self.assertEqual(browser.wheels, [(0.50, 0.66, -360)])
+        self.assertEqual(browser.wheels, [(0.50, 0.66, -120)])
         self.assertTrue(bot.multi_cancel_recovering)
 
     def test_waiting_transfer_detail_requires_the_detail_title(self) -> None:

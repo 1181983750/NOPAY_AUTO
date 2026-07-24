@@ -69,7 +69,7 @@ class DashboardConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "6 位数字"):
             state.set_payment_password("12345")
 
-    def test_clears_only_previous_run_screenshots_and_bot_log(self) -> None:
+    def test_clears_only_previous_run_screenshots_and_keeps_log_handle_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "settings.json"
@@ -86,7 +86,7 @@ class DashboardConfigTests(unittest.TestCase):
             state.clear_previous_run_artifacts()
 
             self.assertFalse((debug_dir / "old_tick.png").exists())
-            self.assertFalse((debug_dir / "dashboard-bot.log").exists())
+            self.assertTrue((debug_dir / "dashboard-bot.log").exists())
             self.assertTrue((debug_dir / "keep.txt").exists())
 
     def test_bot_environment_contains_token_but_not_the_password(self) -> None:
