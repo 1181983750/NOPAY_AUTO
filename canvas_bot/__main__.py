@@ -642,13 +642,21 @@ class BrowserSession:
         await self.page.keyboard.insert_text(str(text))
 
     async def replace_numeric(self, text: str) -> None:
-        """Enter numeric Flutter canvas fields with key events, not text injection."""
+        """Replace a numeric Flutter canvas field using reliable key events."""
         assert self.page is not None
-        await self.page.keyboard.press("Control+A")
+        await self.page.keyboard.press("ControlOrMeta+A")
         await self.page.keyboard.press("Backspace")
+        # Some Flutter web inputs do not honor Control+A consistently. Select
+        # the current line once more, then clear a bounded number of digits.
+        await self.page.keyboard.press("Home")
+        await self.page.keyboard.press("Shift+End")
+        await self.page.keyboard.press("Backspace")
+        for _ in range(24):
+            await self.page.keyboard.press("Backspace")
         for char in str(text):
             if char.isdigit() or char == ".":
                 await self.page.keyboard.press(char)
+                await asyncio.sleep(0.04)
                 await asyncio.sleep(0.04)
 
     async def press(self, key: str) -> None:
@@ -1827,15 +1835,20 @@ class CanvasBot:
 
         x, y = target
         self.record_action(f"按文字定位填写{label}")
-        await browser.click_abs(rect.left + x, rect.top + y)
-        await asyncio.sleep(0.16)
-        await browser.replace_numeric(str(value))
-        await asyncio.sleep(0.28)
+        for attempt in range(2):
+            if attempt:
+                self.record_action(f"重新填写{label}（第 {attempt + 1} 次）")
+            await browser.click_abs(rect.left + x, rect.top + y)
+            await asyncio.sleep(0.16)
+            await browser.replace_numeric(str(value))
+            await asyncio.sleep(0.40)
 
-        _, verify_image, verify_boxes = await self.scan_app(browser)
-        if self.is_field_value_visible(verify_boxes, str(value), target, verify_image):
-            print(f"[state] 已确认{label}显示为 {value}")
-            return True
+            _, verify_image, verify_boxes = await self.scan_app(browser)
+            if self.is_field_value_visible(verify_boxes, str(value), target, verify_image):
+                print(f"[state] 已确认{label}显示为 {value}")
+                return True
+            if attempt == 0:
+                self.record_state("field_value_retry", f"{label}视觉校验未通过，重新输入。", interval_sec=5.0)
 
         await self.save_action_debug(verify_image, verify_boxes, f"field_{label}_not_verified")
         print(f"[warn] 未在{label}输入框确认数值 {value}，停止本次挂单。")
@@ -2397,7 +2410,7 @@ class CanvasBot:
                 return True
             if now <= self.form_expected_until:
                 if self.form_submission_failed:
-                    print("[state] 本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
+                    self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
                     return True
                 if self.is_order_form_visible(image, boxes):
                     return await self.fill_and_submit_canvas_order_form(browser, rect)
@@ -2408,7 +2421,7 @@ class CanvasBot:
 
         if self.is_order_form_visible(image, boxes):
             if self.form_submission_failed:
-                print("[state] 本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
+                self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
                 return True
             return await self.fill_and_submit_canvas_order_form(browser, rect)
 
@@ -2566,7 +2579,7 @@ class CanvasBot:
     async def handle_withdraw_form_page(self, browser: BrowserSession, rect: Rect) -> bool:
         """Only the withdraw form handler may type form values or submit a new order."""
         if self.form_submission_failed:
-            print("[state] 变现表单上次视觉校验失败，等待你手动修改或离开页面。")
+            self.record_state("form_submission_failed", "变现表单上次视觉校验失败，等待你手动修改或离开页面。")
             return True
         return await self.fill_and_submit_canvas_order_form(browser, rect)
 
