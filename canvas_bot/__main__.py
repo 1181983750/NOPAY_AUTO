@@ -1588,7 +1588,7 @@ class CanvasBot:
         now = time.time()
         notification = self.find_trade_notification(image, boxes)
         if notification:
-            await self.notify_once("trade_notification", "NO钱包：收到交易通知", "检测到新的交易通知，请及时处理。")
+            await self.notify_once("trade_notification", "收到交易通知", "检测到新的交易通知，请及时处理。")
             if not self.cfg.get("auto_accept", True):
                 print("[state] 检测到交易通知，自动接单已关闭。")
                 return True
@@ -1704,6 +1704,7 @@ class CanvasBot:
         boxes: list[TextBox],
     ) -> bool:
         """Dismiss the timeout reminder without opening its detail page."""
+        await self.notify_once("order_exception", "订单异常", "检测到订单异常提醒，请及时检查。")
         target = self.find_order_exception_ignore(image, boxes)
         if not target:
             await self.save_action_debug(image, boxes, "order_exception_ignore_not_found")
@@ -2642,6 +2643,145 @@ class CanvasBot:
         await browser.reload()
         return True
 
+    def modal_handlers(self) -> dict[str, Any]:
+        """Return the high-priority modal routes.
+
+        A modal always interrupts the underlying page workflow. Keeping this
+        table separate makes it explicit which dialogs are allowed to act.
+        """
+        return {
+            "trade_notification": self.handle_incoming_order,
+            "order_exception_dialog": self.handle_order_exception_dialog,
+            "cancel_confirm_dialog": self.handle_cancel_confirm_dialog,
+            "password_dialog": self.handle_runtime_password_dialog,
+        }
+
+    async def handle_modal_page(
+        self,
+        page: str,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Dispatch a recognized modal before any normal page handler runs."""
+        handler = self.modal_handlers().get(page)
+        if not handler:
+            return False
+        await handler(browser, rect, image, boxes)
+        return True
+
+    async def handle_content_page(
+        self,
+        page: str,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Run the action owned by the current non-modal page."""
+        if page == "unknown":
+            await self.handle_unknown_page(browser, rect, image, boxes)
+            return True
+
+        if page in {"waiting_transfer", "waiting_transfer_detail"}:
+            await self.notify_once("waiting_transfer", "待付款", "订单已进入待付款状态，请留意买家转账。")
+
+        # These cross-page guards run before page-specific actions. They handle
+        # an accepted order or a new order arriving while a form is open.
+        if await self.handle_post_accept_order_check(browser, rect, image, boxes):
+            return True
+        if await self.handle_incoming_order(browser, rect, image, boxes):
+            return True
+
+        page_handlers = {
+            "auth_page": self._handle_auth_page,
+            "withdraw_unavailable": self._handle_withdraw_unavailable_route,
+            "withdraw_form": self._handle_withdraw_form_route,
+            "orders_empty": self._handle_orders_route,
+            "orders_list": self._handle_orders_route,
+            "move_page": self._handle_move_page_route,
+            "waiting_transfer": self._handle_waiting_page,
+            "waiting_transfer_detail": self._handle_waiting_page,
+            "order_detail": self._handle_waiting_page,
+            "navigation": self._handle_navigation_route,
+        }
+        handler = page_handlers.get(page)
+        if handler:
+            return await handler(browser, rect, image, boxes)
+
+        if self.form_expected_until and time.time() <= self.form_expected_until:
+            self.record_state("form_loading", "等待变现页面加载。", interval_sec=5.0)
+            return True
+        return False
+
+    async def _handle_auth_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
+        return True
+
+    async def _handle_withdraw_unavailable_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        return await self.handle_withdraw_unavailable_page(browser, rect)
+
+    async def _handle_withdraw_form_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        self.move_page_opened = True
+        return await self.handle_withdraw_form_page(browser, rect)
+
+    async def _handle_orders_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        return await self.handle_orders_list_page(browser, rect, image, boxes)
+
+    async def _handle_move_page_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        self.move_page_opened = True
+        return await self.handle_order_workflow(browser, rect, image, boxes)
+
+    async def _handle_waiting_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        self.record_state("order_detail_loading", "订单详情正在加载，等待订单状态文字出现。", interval_sec=5.0)
+        return True
+
+    async def _handle_navigation_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        return await self.open_move_page(browser, rect, image, boxes)
+
     async def tick(self, browser: BrowserSession) -> None:
         rect = await browser.app_rect()
         image = await browser.screenshot_app(rect)
@@ -2665,17 +2805,8 @@ class CanvasBot:
                 pass
         self.note_visual_page(page)
 
-        if page == "trade_notification":
-            await self.notify_once("trade_notification", "收到交易通知", "检测到新的交易通知，请及时处理。")
-        elif page == "order_exception_dialog":
-            await self.notify_once("order_exception", "订单异常", "检测到订单异常提醒，请及时检查。")
-        elif page in {"waiting_transfer", "waiting_transfer_detail"}:
-            await self.notify_once("waiting_transfer", "待付款", "订单已进入待付款状态，请留意买家转账。")
-
-        if page == "unknown":
-            await self.handle_unknown_page(browser, rect, image, boxes)
-            return
-        self.unknown_page_streak = 0
+        if page != "unknown":
+            self.unknown_page_streak = 0
 
         # A manual navigation away from a failed form is an explicit recovery.
         # Forget the stale failure, then let the handler for the new page decide.
@@ -2686,47 +2817,9 @@ class CanvasBot:
             self.form_values = {}
             print("[state] 已离开失败的变现表单，恢复按当前页面识别。")
 
-        if page == "trade_notification":
-            await self.handle_incoming_order(browser, rect, image, boxes)
+        if await self.handle_modal_page(page, browser, rect, image, boxes):
             return
-
-        if page == "order_exception_dialog":
-            await self.handle_order_exception_dialog(browser, rect, image, boxes)
-            return
-
-        if await self.handle_post_accept_order_check(browser, rect, image, boxes):
-            return
-
-        if await self.handle_incoming_order(browser, rect, image, boxes):
-            return
-
-        if page == "cancel_confirm_dialog":
-            return await self.handle_cancel_confirm_dialog(browser, rect, image, boxes)
-        if page == "password_dialog":
-            await self.handle_runtime_password_dialog(browser, rect, image, boxes)
-            return
-        if page == "auth_page":
-            print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
-            return
-        if page == "withdraw_unavailable":
-            return await self.handle_withdraw_unavailable_page(browser, rect)
-        if page == "withdraw_form":
-            self.move_page_opened = True
-            return await self.handle_withdraw_form_page(browser, rect)
-        if page in {"orders_empty", "orders_list"}:
-            return await self.handle_orders_list_page(browser, rect, image, boxes)
-        if page == "move_page":
-            self.move_page_opened = True
-            return await self.handle_order_workflow(browser, rect, image, boxes)
-        if page in {"waiting_transfer", "waiting_transfer_detail", "order_detail"}:
-            print("[state] 订单详情正在加载，等待订单状态文字出现。")
-            return
-        if page == "navigation":
-            return await self.open_move_page(browser, rect, image, boxes)
-
-        if self.form_expected_until and time.time() <= self.form_expected_until:
-            print("[state] 等待变现页面加载。")
-            return
+        await self.handle_content_page(page, browser, rect, image, boxes)
 
     async def run(self) -> None:
         async with BrowserSession(self.cfg) as browser:
