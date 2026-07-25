@@ -12,13 +12,19 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+from .core.context import PageContext
+from .core.models import Rect, TemplateMatch, TextBox
+from .core.text import clamp, normalize_text, resolve_path, split_terms, text_has_any
+from .dialogs.handlers import dispatch_modal
+from .pages.handlers import dispatch_page
+from .services.pushplus import PushPlusNotifier
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,42 +34,11 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def resolve_path(value: str | Path, base: Path = ROOT) -> Path:
-    expanded = os.path.expandvars(os.path.expanduser(str(value)))
-    path = Path(expanded)
-    if path.is_absolute():
-        return path
-    return (base / path).resolve()
-
-
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
     cfg["_config_path"] = str(path.resolve())
     return cfg
-
-
-def normalize_text(value: str) -> str:
-    return re.sub(r"\s+", "", str(value or "")).lower()
-
-
-def split_terms(value: Iterable[str] | str | None) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw = re.split(r"[,，|;；\n]+", value)
-    else:
-        raw = list(value)
-    return [normalize_text(item) for item in raw if normalize_text(item)]
-
-
-def text_has_any(text: str, terms: Iterable[str] | str | None) -> bool:
-    normalized = normalize_text(text)
-    return any(term in normalized for term in split_terms(terms))
-
-
-def clamp(value: float, minimum: float, maximum: float) -> float:
-    return max(minimum, min(maximum, value))
 
 
 def is_chrome_running() -> bool:
@@ -80,101 +55,6 @@ def is_chrome_running() -> bool:
     except Exception:
         return False
     return "chrome.exe" in result.stdout.lower()
-
-
-class PushPlusNotifier:
-    """Best-effort low-frequency notifications through the PushPlus WeChat channel."""
-
-    endpoint = "https://www.pushplus.plus/send/"
-
-    def __init__(self) -> None:
-        self.token = str(os.getenv("QJD67_PUSHPLUS_TOKEN") or "").strip()
-        if not self.token and os.name == "nt":
-            try:
-                import winreg
-
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-                    self.token = str(winreg.QueryValueEx(key, "QJD67_PUSHPLUS_TOKEN")[0] or "").strip()
-            except (FileNotFoundError, OSError):
-                pass
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.token)
-
-    def send(self, title: str, content: str) -> str:
-        if not self.enabled:
-            return "disabled"
-        payload = json.dumps(
-            {
-                "token": self.token,
-                "title": title,
-                "content": content,
-                "template": "txt",
-                "channel": "wechat",
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            self.endpoint,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=8) as response:  # noqa: S310 - configured public HTTPS endpoint
-            return response.read().decode("utf-8", errors="replace")
-
-
-@dataclass
-class Rect:
-    left: float
-    top: float
-    width: float
-    height: float
-    source: str = "unknown"
-
-    @property
-    def right(self) -> float:
-        return self.left + self.width
-
-    @property
-    def bottom(self) -> float:
-        return self.top + self.height
-
-    def point(self, rx: float, ry: float) -> tuple[float, float]:
-        return self.left + self.width * rx, self.top + self.height * ry
-
-
-@dataclass
-class TextBox:
-    text: str
-    confidence: float
-    left: float
-    top: float
-    right: float
-    bottom: float
-
-    @property
-    def center(self) -> tuple[float, float]:
-        return (self.left + self.right) / 2, (self.top + self.bottom) / 2
-
-    @property
-    def normalized(self) -> str:
-        return normalize_text(self.text)
-
-
-@dataclass
-class TemplateMatch:
-    name: str
-    confidence: float
-    left: float
-    top: float
-    width: float
-    height: float
-
-    @property
-    def center(self) -> tuple[float, float]:
-        return self.left + self.width / 2, self.top + self.height / 2
 
 
 class VisionEngine:
@@ -2742,19 +2622,6 @@ class CanvasBot:
         await browser.reload()
         return True
 
-    def modal_handlers(self) -> dict[str, Any]:
-        """Return the high-priority modal routes.
-
-        A modal always interrupts the underlying page workflow. Keeping this
-        table separate makes it explicit which dialogs are allowed to act.
-        """
-        return {
-            "trade_notification": self.handle_incoming_order,
-            "order_exception_dialog": self.handle_order_exception_dialog,
-            "cancel_confirm_dialog": self.handle_cancel_confirm_dialog,
-            "password_dialog": self.handle_runtime_password_dialog,
-        }
-
     async def handle_modal_page(
         self,
         page: str,
@@ -2763,12 +2630,8 @@ class CanvasBot:
         image: Image.Image,
         boxes: list[TextBox],
     ) -> bool:
-        """Dispatch a recognized modal before any normal page handler runs."""
-        handler = self.modal_handlers().get(page)
-        if not handler:
-            return False
-        await handler(browser, rect, image, boxes)
-        return True
+        """Delegate high-priority dialog handling to ``canvas_bot.dialogs``."""
+        return await dispatch_modal(self, page, PageContext(browser, rect, image, boxes))
 
     async def handle_content_page(
         self,
@@ -2778,117 +2641,8 @@ class CanvasBot:
         image: Image.Image,
         boxes: list[TextBox],
     ) -> bool:
-        """Run the action owned by the current non-modal page."""
-        if page == "unknown":
-            await self.handle_unknown_page(browser, rect, image, boxes)
-            return True
-
-        if page in {"waiting_transfer", "waiting_transfer_detail"}:
-            await self.notify_once("waiting_transfer", "待付款", "订单已进入待付款状态，请留意买家转账。")
-
-        # These cross-page guards run before page-specific actions. They handle
-        # an accepted order or a new order arriving while a form is open.
-        if await self.handle_post_accept_order_check(browser, rect, image, boxes):
-            return True
-        if await self.handle_incoming_order(browser, rect, image, boxes):
-            return True
-
-        page_handlers = {
-            "auth_page": self._handle_auth_page,
-            "withdraw_unavailable": self._handle_withdraw_unavailable_route,
-            "withdraw_form": self._handle_withdraw_form_route,
-            "orders_empty": self._handle_orders_route,
-            "orders_list": self._handle_orders_route,
-            "move_page": self._handle_move_page_route,
-            "waiting_transfer": self._handle_waiting_page,
-            "waiting_transfer_detail": self._handle_waiting_page,
-            "order_detail": self._handle_order_detail_route,
-            "navigation": self._handle_navigation_route,
-        }
-        handler = page_handlers.get(page)
-        if handler:
-            return await handler(browser, rect, image, boxes)
-
-        if self.form_expected_until and time.time() <= self.form_expected_until:
-            self.record_state("form_loading", "等待变现页面加载。", interval_sec=5.0)
-            return True
-        return False
-
-    async def _handle_auth_page(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        print("[state] 当前是登录/注册页，请先手动登录；不刷新页面。")
-        return True
-
-    async def _handle_withdraw_unavailable_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        return await self.handle_withdraw_unavailable_page(browser, rect)
-
-    async def _handle_withdraw_form_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        self.move_page_opened = True
-        return await self.handle_withdraw_form_page(browser, rect)
-
-    async def _handle_orders_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        return await self.handle_orders_list_page(browser, rect, image, boxes)
-
-    async def _handle_move_page_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        self.move_page_opened = True
-        return await self.handle_order_workflow(browser, rect, image, boxes)
-
-    async def _handle_waiting_page(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        self.record_state("order_detail_loading", "订单详情正在加载，等待订单状态文字出现。", interval_sec=5.0)
-        return True
-
-    async def _handle_order_detail_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        return await self.handle_order_detail_page(browser, rect, image, boxes)
-
-    async def _handle_navigation_route(
-        self,
-        browser: BrowserSession,
-        rect: Rect,
-        image: Image.Image,
-        boxes: list[TextBox],
-    ) -> bool:
-        return await self.open_move_page(browser, rect, image, boxes)
+        """Delegate normal page handling to ``canvas_bot.pages``."""
+        return await dispatch_page(self, page, PageContext(browser, rect, image, boxes))
 
     async def tick(self, browser: BrowserSession) -> None:
         rect = await browser.app_rect()
