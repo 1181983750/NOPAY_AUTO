@@ -633,6 +633,26 @@ class PendingStateTests(unittest.TestCase):
         )
         self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
 
+    def test_failed_withdraw_form_returns_through_top_left_back(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.relative_clicks: list[tuple[float, float]] = []
+
+            async def click_relative(self, _rect, x: float, y: float) -> None:
+                self.relative_clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.7, "points": {"order_detail_back": [0.08, 0.04]}}
+        bot.last_action_at = 0.0
+        bot.last_failed_form_back_at = 0.0
+        bot.form_submission_failed = True
+        bot.next_post_after = 0.0
+        browser = FakeBrowser()
+
+        self.assertTrue(asyncio.run(bot.handle_withdraw_form_page(browser, Rect(0, 0, 506, 900))))
+        self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
+        self.assertGreater(bot.next_post_after, 0.0)
+
     def test_buyer_detail_interrupt_clears_failed_form_and_returns(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:

@@ -2540,7 +2540,16 @@ class CanvasBot:
     async def handle_withdraw_form_page(self, browser: BrowserSession, rect: Rect) -> bool:
         """Only the withdraw form handler may type form values or submit a new order."""
         if self.form_submission_failed:
-            self.record_state("form_submission_failed", "变现表单上次视觉校验失败，等待你手动修改或离开页面。")
+            now = time.time()
+            last_back = getattr(self, "last_failed_form_back_at", 0.0)
+            if now - last_back < 2.0 or not self.can_act():
+                self.record_state("form_submission_failed", "变现表单视觉校验失败，等待返回搬砖页。", interval_sec=5.0)
+                return True
+            self.record_action("变现表单视觉校验失败，点击左上角返回搬砖页重新读取余额")
+            back = self.points.get("order_detail_back", [0.08, 0.04])
+            await browser.click_relative(rect, float(back[0]), float(back[1]))
+            self.last_failed_form_back_at = now
+            self.next_post_after = now + 1.5
             return True
         return await self.fill_and_submit_canvas_order_form(browser, rect)
 
