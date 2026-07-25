@@ -6,10 +6,11 @@
 
 | 页面标识 | 委托动作 | 业务边界 |
 | --- | --- | --- |
+| `trade_success_dialog` | 点击“知道了”关闭成功提示 | 必须同时识别“交易成功”和“知道了”，不触碰到账或放行确认 |
 | `trade_notification` | `handle_incoming_order` | 仅在自动接单开关开启且收款方式匹配时同意 |
 | `order_exception_dialog` | `handle_order_exception_dialog` | 按既有规则忽略/关闭异常提示 |
 | `cancel_confirm_dialog` | `handle_cancel_confirm_dialog` | 只确认当前已选择的超时挂单 |
-| `password_dialog` | `handle_runtime_password_dialog` | 仅使用控制台内存中的支付密码 |
+| `password_dialog` | `handle_runtime_password_dialog` | 仅使用控制台内存中的支付密码；输入后弹窗未关闭时不重复输入 |
 
 ## 修改规则
 

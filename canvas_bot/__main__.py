@@ -672,6 +672,7 @@ class CanvasBot:
         self.unknown_page_streak = 0
         self.last_unknown_page_reload_at = 0.0
         self.last_password_input_at = 0.0
+        self.password_dialog_input_pending = False
         self._state_log_times: dict[str, float] = {}
 
     async def notify_once(self, event: str, title: str, content: str) -> None:
@@ -982,6 +983,32 @@ class CanvasBot:
             bounds=(width * 0.12, height * 0.10, width * 0.88, height * 0.48),
         )
 
+    def find_trade_success_ack(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | None:
+        """Find the acknowledgement button on the non-financial trade-success dialog.
+
+        A completed-order detail page can itself contain words such as ``放行``.  The
+        acknowledgement is therefore recognized only when the same visible dialog
+        also states that the trade has succeeded; it must never be treated as a
+        generic confirmation button.
+        """
+        width, height = image.size
+        success = self.vision.find_text(
+            boxes,
+            self.texts.get("trade_success", ["交易成功"]),
+            prefer_center=True,
+            max_text_length=20,
+            bounds=(width * 0.20, height * 0.20, width * 0.80, height * 0.68),
+        )
+        if not success:
+            return None
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("trade_success_ack", ["知道了"]),
+            prefer_center=True,
+            max_text_length=12,
+            bounds=(width * 0.20, height * 0.58, width * 0.80, height * 0.92),
+        )
+
     def find_order_exception_dialog(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
         """Recognize the timeout/order-exception reminder modal."""
         template = self.vision.find_template(image, "order_exception")
@@ -1156,6 +1183,8 @@ class CanvasBot:
 
     def classify_visual_page(self, image: Image.Image, boxes: list[TextBox]) -> str:
         """Classify the visible Flutter page before deciding which actions are allowed."""
+        if self.find_trade_success_ack(image, boxes):
+            return "trade_success_dialog"
         if self.find_trade_notification(image, boxes):
             return "trade_notification"
         if self.find_order_exception_dialog(image, boxes):
@@ -1195,6 +1224,7 @@ class CanvasBot:
         self.last_visual_page = page
         labels = {
             "password_dialog": "支付密码弹窗",
+            "trade_success_dialog": "交易成功提示",
             "trade_notification": "交易通知",
             "order_exception_dialog": "订单异常提醒",
             "cancel_confirm_dialog": "取消确认弹窗",
@@ -1243,13 +1273,18 @@ class CanvasBot:
         image: Image.Image,
         boxes: list[TextBox],
     ) -> tuple[float, float] | None:
-        """Locate the first six-digit password box from the dialog heading."""
+        """Locate the center of the first six-digit password box from its heading."""
         heading = self.find_password_dialog(image, boxes)
         if not heading:
             return None
         width, height = image.size
         heading_x, _ = heading.center
-        x = heading_x - width * 0.31
+        # The six Flutter boxes are horizontally centered under the heading.  The
+        # prior 0.31 ratio landed in the blank margin left of the first box on a
+        # 568px-wide canvas, so keyboard events were sent without a focused field.
+        # A 0.21 ratio reaches the center of the first visible slot across the
+        # supported mobile canvas widths.
+        x = heading_x - width * 0.21
         y = heading.bottom + clamp(height * 0.062, 46, 64)
         if x <= 12 or y >= height - 16:
             return None
@@ -1732,6 +1767,27 @@ class CanvasBot:
         await self.click_visual_target(browser, rect, target)
         return True
 
+    async def handle_trade_success_dialog(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Close the completed-trade acknowledgement before reading its detail page."""
+        target = self.find_trade_success_ack(image, boxes)
+        if not target:
+            return True
+        now = time.time()
+        last_ack = getattr(self, "last_trade_success_ack_at", 0.0)
+        if now - last_ack < 0.8 or not self.can_act():
+            return True
+        await self.save_action_debug(image, boxes, "trade_success_ack")
+        self.record_action("交易成功提示，点击知道了关闭")
+        await self.click_visual_target(browser, rect, target)
+        self.last_trade_success_ack_at = now
+        return True
+
     async def handle_post_accept_order_check(
         self,
         browser: BrowserSession,
@@ -1980,6 +2036,13 @@ class CanvasBot:
         boxes: list[TextBox],
     ) -> bool:
         """Allow a password entered in the dashboard after the dialog appeared."""
+        if getattr(self, "password_dialog_input_pending", False):
+            self.record_state(
+                "password_dialog_pending",
+                "支付密码已输入但弹窗未关闭，暂停重复输入；请检查密码或手动确认。",
+                interval_sec=5.0,
+            )
+            return True
         now = time.time()
         if now - self.last_password_input_at < 3.0:
             return False
@@ -1999,6 +2062,7 @@ class CanvasBot:
             entered = await self.type_password_with_keyboard(browser, rect, password, image, boxes)
         if not entered:
             return False
+        self.password_dialog_input_pending = True
         await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
         if password_cfg.get("confirm_after_input", False):
             await self.confirm_password_if_still_visible(browser)
@@ -2102,6 +2166,7 @@ class CanvasBot:
                     password_scan[2],
                 ):
                     return False
+            self.password_dialog_input_pending = True
             await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
             if password_cfg.get("confirm_after_input", False):
                 await self.confirm_password_if_still_visible(browser)
@@ -2774,6 +2839,9 @@ class CanvasBot:
             except Exception:
                 pass
         self.note_visual_page(page)
+
+        if page != "password_dialog":
+            self.password_dialog_input_pending = False
 
         if page != "unknown":
             self.unknown_page_streak = 0

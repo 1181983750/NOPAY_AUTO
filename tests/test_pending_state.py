@@ -488,6 +488,60 @@ class PendingStateTests(unittest.TestCase):
         self.assertTrue(asyncio.run(bot.handle_order_exception_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(clicked, ["忽略"])
 
+    def test_trade_success_dialog_closes_only_its_acknowledgement(self) -> None:
+        class FakeBrowser:
+            pass
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "action_throttle_sec": 0.1,
+            "texts": {
+                "trade_success": ["交易成功"],
+                "trade_success_ack": ["知道了"],
+            },
+        }
+        bot.last_action_at = 0.0
+        bot.last_trade_success_ack_at = 0.0
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        clicked: list[str] = []
+
+        async def click_target(_browser, _rect, target) -> None:
+            clicked.append(target.text)
+
+        bot.click_visual_target = click_target
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [
+            TextBox("交易成功", 0.99, 190, 335, 320, 375),
+            TextBox("知道了", 0.99, 185, 670, 320, 720),
+            TextBox("确认放行", 0.99, 360, 500, 460, 530),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "trade_success_dialog")
+        self.assertTrue(asyncio.run(bot.handle_trade_success_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
+        self.assertEqual(clicked, ["知道了"])
+
+    def test_runtime_password_dialog_does_not_repeat_an_unacknowledged_input(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.password_dialog_input_pending = True
+        messages: list[str] = []
+        bot.record_state = lambda _key, message, interval_sec=0: messages.append(message)
+
+        self.assertTrue(
+            asyncio.run(
+                bot.handle_runtime_password_dialog(
+                    None,
+                    Rect(0, 0, 506, 900),
+                    Image.new("RGB", (506, 900), "white"),
+                    [],
+                )
+            )
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("暂停重复输入", messages[0])
+
     def test_orders_page_pull_refresh_runs_once_per_minute(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
@@ -781,7 +835,7 @@ class PendingStateTests(unittest.TestCase):
         asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading]))
 
         self.assertEqual(len(browser.clicks), 1)
-        self.assertAlmostEqual(browser.clicks[0][0], 111.52, places=2)
+        self.assertAlmostEqual(browser.clicks[0][0], 162.32, places=2)
         self.assertAlmostEqual(browser.clicks[0][1], 450.8, places=2)
         self.assertEqual(browser.keys, ["1", "2", "3", "4", "5", "6"])
 
@@ -804,7 +858,7 @@ class PendingStateTests(unittest.TestCase):
         target = bot.resolve_password_field_target(image, [heading])
 
         self.assertIsNotNone(target)
-        self.assertAlmostEqual(target[0], 111.52, places=2)
+        self.assertAlmostEqual(target[0], 162.32, places=2)
         self.assertGreater(target[1], heading.bottom)
 
     def test_configured_submit_terms_match_determine_withdraw_button(self) -> None:
