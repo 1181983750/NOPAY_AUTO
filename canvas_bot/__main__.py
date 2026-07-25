@@ -653,11 +653,12 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         for _ in range(24):
             await self.page.keyboard.press("Backspace")
-        for char in str(text):
-            if char.isdigit() or char == ".":
-                await self.page.keyboard.press(char)
-                await asyncio.sleep(0.04)
-                await asyncio.sleep(0.04)
+        value = "".join(char for char in str(text) if char.isdigit() or char == ".")
+        if value:
+            # Flutter's hidden text input handles Playwright's type events more
+            # consistently than isolated press events, especially after the
+            # amount field was updated through the 全部 action.
+            await self.page.keyboard.type(value, delay=40)
 
     async def press(self, key: str) -> None:
         assert self.page is not None
@@ -961,8 +962,10 @@ class CanvasBot:
     def is_order_detail_interrupt_page(self, image: Image.Image, boxes: list[TextBox]) -> bool:
         """Recognize a buyer/order detail page that interrupts a posting form mid-flow."""
         width, height = image.size
-        detail_terms = list(self.texts.get("order_detail", ["出售详情"]))
+        detail_terms = ["出售详情", "搬砖详情", "订单详情"]
+        detail_terms.extend(self.texts.get("order_detail", []))
         detail_terms.extend(self.texts.get("buyer_detail", ["买家详情", "订单详情"]))
+        detail_terms = list(dict.fromkeys(detail_terms))
         return bool(
             self.vision.find_text(
                 boxes,
@@ -1834,11 +1837,17 @@ class CanvasBot:
             print(f"[warn] 未识别{label}标签，不填写该字段。")
             return False
 
-        x, y = target
         self.record_action(f"按文字定位填写{label}")
         for attempt in range(2):
             if attempt:
                 self.record_action(f"重新填写{label}（第 {attempt + 1} 次）")
+                rect, image, boxes = await self.scan_app(browser)
+                target = self.resolve_canvas_field_target(image, boxes, label_terms, x_ratio)
+                if not target:
+                    await self.save_action_debug(image, boxes, f"field_{label}_retry_target_not_found")
+                    print(f"[warn] 重试时未识别{label}输入框，停止本次挂单。")
+                    return False
+            x, y = target
             await browser.click_abs(rect.left + x, rect.top + y)
             await asyncio.sleep(0.16)
             await browser.replace_numeric(str(value))
@@ -2603,6 +2612,25 @@ class CanvasBot:
         self.move_page_opened = True
         return True
 
+    async def handle_order_detail_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Leave non-payment order details through the top-left back button."""
+        now = time.time()
+        last_back = getattr(self, "last_order_detail_back_at", 0.0)
+        if now - last_back < 1.5 or not self.can_act():
+            return True
+        await self.save_action_debug(image, boxes, "order_detail_back")
+        self.record_action("订单详情页，点击左上角返回")
+        back = self.points.get("order_detail_back", [0.08, 0.04])
+        await browser.click_relative(rect, float(back[0]), float(back[1]))
+        self.last_order_detail_back_at = now
+        return True
+
     async def open_move_page(self, browser: BrowserSession, rect: Rect, image: Image.Image, boxes: list[TextBox]) -> bool:
         target = self.find_move_page_tab(image, boxes)
         if not target:
@@ -2703,7 +2731,7 @@ class CanvasBot:
             "move_page": self._handle_move_page_route,
             "waiting_transfer": self._handle_waiting_page,
             "waiting_transfer_detail": self._handle_waiting_page,
-            "order_detail": self._handle_waiting_page,
+            "order_detail": self._handle_order_detail_route,
             "navigation": self._handle_navigation_route,
         }
         handler = page_handlers.get(page)
@@ -2772,6 +2800,15 @@ class CanvasBot:
     ) -> bool:
         self.record_state("order_detail_loading", "订单详情正在加载，等待订单状态文字出现。", interval_sec=5.0)
         return True
+
+    async def _handle_order_detail_route(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        return await self.handle_order_detail_page(browser, rect, image, boxes)
 
     async def _handle_navigation_route(
         self,

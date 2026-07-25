@@ -5,10 +5,33 @@ from decimal import Decimal
 
 from PIL import Image
 
-from canvas_bot.__main__ import CanvasBot, ROOT, Rect, TextBox, VisionEngine, load_config
+from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, VisionEngine, load_config
 
 
 class PendingStateTests(unittest.TestCase):
+    def test_replace_numeric_uses_playwright_keyboard_type(self) -> None:
+        class FakeKeyboard:
+            def __init__(self) -> None:
+                self.presses: list[str] = []
+                self.typed: list[tuple[str, int]] = []
+
+            async def press(self, key: str) -> None:
+                self.presses.append(key)
+
+            async def type(self, value: str, delay: int = 0) -> None:
+                self.typed.append((value, delay))
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.keyboard = FakeKeyboard()
+
+        browser = BrowserSession.__new__(BrowserSession)
+        browser.page = FakePage()
+
+        asyncio.run(browser.replace_numeric("1500"))
+
+        self.assertEqual(browser.page.keyboard.typed, [("1500", 40)])
+
     def test_multi_order_plans_remaining_balance_and_rotates_card_keywords(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {
@@ -561,6 +584,44 @@ class PendingStateTests(unittest.TestCase):
         ]
 
         self.assertEqual(bot.classify_visual_page(image, boxes), "withdraw_unavailable")
+
+    def test_page_classifier_identifies_move_order_detail_page(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"texts": {"move_page_tab": ["搬砖"], "order_detail": ["出售详情"]}}
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [TextBox("搬砖详情", 0.99, 190, 20, 315, 55)]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "order_detail")
+
+    def test_move_order_detail_returns_through_top_left_back(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.relative_clicks: list[tuple[float, float]] = []
+
+            async def click_relative(self, _rect, x: float, y: float) -> None:
+                self.relative_clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.7, "points": {"order_detail_back": [0.08, 0.04]}}
+        bot.last_action_at = 0.0
+        bot.last_order_detail_back_at = 0.0
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        browser = FakeBrowser()
+
+        self.assertTrue(
+            asyncio.run(
+                bot.handle_order_detail_page(
+                    browser,
+                    Rect(0, 0, 506, 900),
+                    Image.new("RGB", (506, 900), "white"),
+                    [TextBox("搬砖详情", 0.99, 190, 20, 315, 55)],
+                )
+            )
+        )
+        self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
 
     def test_buyer_detail_interrupt_clears_failed_form_and_returns(self) -> None:
         class FakeBrowser:
