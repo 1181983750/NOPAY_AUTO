@@ -6,6 +6,7 @@
 
 | 页面标识 | 委托动作 | 业务边界 |
 | --- | --- | --- |
+| `submit_confirm_dialog` | 点击变现二次确认的“确认” | 仅在本轮已提交变现表单的短时窗口内执行 |
 | `trade_success_dialog` | 点击“知道了”关闭成功提示 | 必须同时识别“交易成功”和“知道了”，不触碰到账或放行确认 |
 | `trade_notification` | `handle_incoming_order` | 仅在自动接单开关开启且收款方式匹配时同意 |
 | `order_exception_dialog` | `handle_order_exception_dialog` | 按既有规则忽略/关闭异常提示 |

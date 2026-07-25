@@ -63,6 +63,18 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(bot.prepare_multi_order_values(Decimal("999.99")))
         self.assertTrue(bot.multi_batch_complete)
 
+    def test_multi_order_uses_all_when_configured_order_would_leave_subminimum_remainder(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}
+        bot.multi_batch_complete = False
+        bot.form_values = {}
+
+        self.assertTrue(bot.prepare_multi_order_values(Decimal("4164.6")))
+        self.assertEqual(
+            bot.form_values,
+            {"amount": "4164.6", "limit_min": "1500", "limit_max": "4164", "use_all_balance": "true"},
+        )
+
     def test_form_balance_replans_stale_multi_order_to_use_all(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"amount": "3000", "limit_min": "1000", "limit_max": "3000"}
@@ -145,6 +157,13 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(bot.multi_batch_complete)
 
     def test_scrolled_view_without_pending_keeps_multi_timer_when_balance_is_still_locked(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.wheels: list[tuple[float, float, float]] = []
+
+            async def wheel_relative(self, _rect, x: float, y: float, delta: float) -> None:
+                self.wheels.append((x, y, delta))
+
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {
             "limit_min": "1000",
@@ -170,9 +189,11 @@ class PendingStateTests(unittest.TestCase):
         bot.start_order_flow = start_order
         bot.save_action_debug = lambda *_args: None
 
-        self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(None, Rect(0, 0, 506, 900), image, boxes)))
+        browser = FakeBrowser()
+        self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(browser, Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(bot.multi_pending_since, [123.0])
         self.assertEqual(started, [])
+        self.assertEqual(browser.wheels, [(0.50, 0.66, -720)])
 
     def test_existing_pending_orders_can_be_adopted_from_current_start_time(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
@@ -522,6 +543,53 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(bot.classify_visual_page(image, boxes), "trade_success_dialog")
         self.assertTrue(asyncio.run(bot.handle_trade_success_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(clicked, ["知道了"])
+        self.assertEqual(bot.post_accept_order_check, "open")
+        self.assertGreater(bot.post_accept_order_check_until, time.time())
+
+    def test_post_accept_check_timeout_releases_orders_page_flow(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.post_accept_order_check = "inspect"
+        bot.post_accept_order_check_until = 0.0
+
+        self.assertFalse(
+            asyncio.run(
+                bot.handle_post_accept_order_check(
+                    object(),
+                    Rect(0, 0, 506, 900),
+                    Image.new("RGB", (506, 900), "white"),
+                    [],
+                )
+            )
+        )
+        self.assertEqual(bot.post_accept_order_check, "")
+
+    def test_submit_confirm_dialog_clicks_only_after_this_run_submitted_the_form(self) -> None:
+        class FakeBrowser:
+            pass
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.1, "texts": {"submit_confirm_title": ["确认变现"]}}
+        bot.last_action_at = 0.0
+        bot.submit_confirm_until = time.time() + 10.0
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        clicked: list[str] = []
+
+        async def click_target(_browser, _rect, target) -> None:
+            clicked.append(target.text)
+
+        bot.click_visual_target = click_target
+        image = Image.new("RGB", (568, 730), "white")
+        boxes = [
+            TextBox("确认变现", 0.99, 245, 456, 326, 483),
+            TextBox("确认", 0.99, 263, 677, 307, 703),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "submit_confirm_dialog")
+        self.assertTrue(asyncio.run(bot.handle_submit_confirm_dialog(FakeBrowser(), Rect(0, 0, 568, 730), image, boxes)))
+        self.assertEqual(clicked, ["确认"])
 
     def test_runtime_password_dialog_does_not_repeat_an_unacknowledged_input(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
@@ -726,6 +794,27 @@ class PendingStateTests(unittest.TestCase):
         )
         self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
 
+    def test_order_detail_back_uses_centered_canvas_left_edge(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.relative_clicks: list[tuple[float, float]] = []
+
+            async def click_relative(self, _rect, x: float, y: float) -> None:
+                self.relative_clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.1, "points": {"order_detail_back": [0.08, 0.04]}}
+        bot.last_action_at = 0.0
+        bot.last_order_detail_back_at = 0.0
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        image = Image.new("RGB", (574, 722), "white")
+        boxes = [TextBox("挂单单号", 0.99, 110, 120, 190, 145)]
+        browser = FakeBrowser()
+
+        self.assertTrue(asyncio.run(bot.handle_order_detail_page(browser, Rect(0, 0, 574, 722), image, boxes)))
+        self.assertAlmostEqual(browser.relative_clicks[0][0], (110 + 5.74) / 574, places=4)
+        self.assertEqual(browser.relative_clicks[0][1], 0.04)
+
     def test_failed_withdraw_form_returns_through_top_left_back(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
@@ -745,6 +834,9 @@ class PendingStateTests(unittest.TestCase):
         self.assertTrue(asyncio.run(bot.handle_withdraw_form_page(browser, Rect(0, 0, 506, 900))))
         self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
         self.assertGreater(bot.next_post_after, 0.0)
+
+        self.assertTrue(asyncio.run(bot.handle_withdraw_form_page(browser, Rect(0, 0, 506, 900))))
+        self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
 
     def test_buyer_detail_interrupt_clears_failed_form_and_returns(self) -> None:
         class FakeBrowser:
