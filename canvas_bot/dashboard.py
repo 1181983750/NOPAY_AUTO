@@ -477,6 +477,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .field-label { display:flex; align-items:center; gap:6px; }
     .info { display:inline-grid; width:16px; height:16px; place-items:center; border:1px solid var(--muted); border-radius:50%; color:var(--muted); font-size:11px; font-weight:700; cursor:help; }
     input[type="text"], input[type="number"], select, textarea { width:100%; min-height:36px; border:1px solid var(--line); border-radius:5px; padding:6px 8px; color:var(--ink); background:#fff; }
+    input[readonly] { color:#667085; background:#f3f5f8; cursor:not-allowed; }
     textarea { min-height:74px; resize:vertical; }
     input:focus { outline:2px solid #b6d3ff; border-color:var(--blue); }
     .checks { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
@@ -518,8 +519,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         <fieldset><legend>等待与节奏（秒）</legend><div class="form-grid">
           <label>运行速度<select name="speed_mode"><option value="safe">安全：稳妥校验</option><option value="fast">极速：缩短页面与表单等待</option></select><span class="hint">极速不缩短支付密码、取消确认和重挂等待。</span></label>
           <label>挂单后重挂等待<input name="repost_delay_sec" type="number" min="1" step="1"></label>
-          <label>页面轮询间隔<input name="poll_interval_sec" type="number" min="0.1" step="0.1" readonly></label>
-          <label>操作最小间隔<input name="action_throttle_sec" type="number" min="0.1" step="0.1" readonly></label>
+          <label>页面轮询间隔 <span class="hint">由速度档位控制</span><input name="poll_interval_sec" type="number" min="0.1" step="0.1" readonly aria-readonly="true"></label>
+          <label>操作最小间隔 <span class="hint">由速度档位控制</span><input name="action_throttle_sec" type="number" min="0.1" step="0.1" readonly aria-readonly="true"></label>
           <label>取消二次确认等待<input name="cancel_confirm_delay_sec" type="number" min="0.1" step="0.1"></label>
           <label>取消确认超时<input name="cancel_confirm_timeout_sec" type="number" min="1" step="1"></label>
           <label>挂单二次确认超时<input name="submit_secondary_confirm_timeout_sec" type="number" min="1" step="1"></label>
@@ -528,7 +529,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label><span class="field-label">收款卡片关键词列表 <span class="info" tabindex="0" aria-label="填写规则" title="推荐每行一张收款卡关键词。也支持英文逗号、中文逗号、英文分号分隔；不要用空格分隔。脚本按填写顺序循环选择。">i</span></span><textarea name="payment_keywords" placeholder="每行一张卡关键词" title="推荐每行一张收款卡关键词。也支持英文逗号、中文逗号、英文分号分隔；不要用空格分隔。脚本按填写顺序循环选择。"></textarea></label>
           <label>卡片 OCR 查找次数<input name="payment_ocr_attempts" type="number" min="1" max="30" step="1"></label>
           <label>取消重试间隔<input name="cancel_retry_interval_sec" type="number" min="0.1" step="0.1"></label>
-          <label>挂单二次确认等待<input name="submit_secondary_confirm_delay_sec" type="number" min="0.1" step="0.1" readonly></label>
+          <label>挂单二次确认等待 <span class="hint">由速度档位控制</span><input name="submit_secondary_confirm_delay_sec" type="number" min="0.1" step="0.1" readonly aria-readonly="true"></label>
           <label>支付密码弹窗超时<input name="submit_password_timeout_sec" type="number" min="1" step="1"></label>
         </div><div class="checks" style="margin-top:14px">
           <label><input name="auto_make_order" type="checkbox"> 自动挂单</label>
@@ -552,10 +553,15 @@ DASHBOARD_HTML = r"""<!doctype html>
   <script>
     const $ = (s) => document.querySelector(s);
     let config = null;
+    const speedProfiles = {
+      safe: { poll_interval_sec: 0.8, action_throttle_sec: 0.7, submit_secondary_confirm_delay_sec: 0.5 },
+      fast: { poll_interval_sec: 0.5, action_throttle_sec: 0.45, submit_secondary_confirm_delay_sec: 0.35 },
+    };
     const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec'];
     const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
     function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}`; }
+    function applySpeedProfile(mode) { const profile = speedProfiles[mode]; if (!profile) return; Object.entries(profile).forEach(([name, value]) => { const input = document.querySelector(`[name="${name}"]`); if (input) input.value = value; }); }
     async function loadConfig() { fill(await request('/api/config')); }
     function collect() { const data = {}; names.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).value); checks.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).checked); return data; }
     async function save(e) { e.preventDefault(); const message = $('#save-message'); message.className = 'status-text'; message.textContent = '保存中...'; try { const data = await request('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collect())}); message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
@@ -566,7 +572,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderLog(value) { const log = $('#log'); const follow = !logInitialized || logNearBottom(log); log.textContent = value || '暂无本控制台启动的日志。'; logInitialized = true; if (follow) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }); }
     async function refresh() { try { const s = await request('/api/status'); $('#state').textContent = s.running ? '运行中' : '未运行'; $('#state').className = `state ${s.running ? 'on' : ''}`; $('#run-state').textContent = s.running ? '运行中' : '未运行'; $('#pid').textContent = s.pid || '-'; $('#config-state').textContent = s.running ? '重启后更新' : '已就绪'; renderLog(s.log); $('#start').disabled = s.running; $('#stop').disabled = !s.running; } catch (_) {} }
     async function shots() { const gallery = $('#gallery'); const list = await request('/api/screenshots'); gallery.replaceChildren(); list.forEach(item => { const wrap=document.createElement('div'); wrap.className='shot'; const button=document.createElement('button'); const image=document.createElement('img'); image.loading='lazy'; image.src=`/debug/${encodeURIComponent(item.name)}?t=${item.time}`; image.alt=item.name; button.append(image); button.onclick=()=>{ $('#preview img').src=image.src; $('#preview').showModal(); }; const label=document.createElement('small'); label.textContent=item.name; wrap.append(button,label); gallery.append(wrap); }); }
-    $('#settings').addEventListener('submit', save); $('#save-password').onclick=savePassword; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
+    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#save-password').onclick=savePassword; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
     Promise.all([loadConfig(), refresh(), shots()]); setInterval(refresh, 1500); setInterval(shots, 7000);
   </script>
 </body></html>"""

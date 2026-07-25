@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from canvas_bot.dashboard import DashboardState, public_config, validate_dashboard_settings, write_config
+from canvas_bot.services.telegram import TelegramNotifier
 
 
 class DashboardConfigTests(unittest.TestCase):
@@ -114,6 +115,11 @@ class DashboardConfigTests(unittest.TestCase):
             self.assertEqual(environment["QJD67_DASHBOARD_URL"], "http://127.0.0.1:8765")
             self.assertEqual(environment["QJD67_DASHBOARD_TOKEN"], "token")
             self.assertNotIn("QJD67_PAY_PASSWORD", environment)
+
+    def test_telegram_requires_token_and_chat_id(self) -> None:
+        self.assertFalse(TelegramNotifier(token="token-only", chat_id="").enabled)
+        self.assertFalse(TelegramNotifier(token="", chat_id="123").enabled)
+        self.assertTrue(TelegramNotifier(token="token", chat_id="123").enabled)
 
 
 if __name__ == "__main__":

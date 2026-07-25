@@ -10,6 +10,7 @@ import urllib.request
 class PushPlusNotifier:
     """Best-effort low-frequency notifications through the PushPlus WeChat channel."""
 
+    name = "PushPlus"
     endpoint = "https://www.pushplus.plus/send/"
 
     def __init__(self) -> None:

@@ -25,6 +25,7 @@ from .core.text import clamp, normalize_text, resolve_path, split_terms, text_ha
 from .dialogs.handlers import dispatch_modal
 from .pages.handlers import dispatch_page
 from .services.pushplus import PushPlusNotifier
+from .services.telegram import TelegramNotifier
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -631,6 +632,8 @@ class CanvasBot:
         self.cfg = cfg
         self.vision = VisionEngine(cfg)
         self.pushplus = PushPlusNotifier()
+        self.telegram = TelegramNotifier()
+        self.notifiers = [self.pushplus, self.telegram]
         self.notified_events: set[str] = set()
         self.pending_since = 0.0
         self.form_expected_after = 0.0
@@ -676,15 +679,20 @@ class CanvasBot:
         notified_events = getattr(self, "notified_events", None)
         if notified_events is None:
             notified_events = self.notified_events = set()
-        notifier = getattr(self, "pushplus", None)
-        if event in notified_events or not notifier or not notifier.enabled:
+        notifiers = getattr(self, "notifiers", None)
+        if notifiers is None:
+            notifiers = [getattr(self, "pushplus", None), getattr(self, "telegram", None)]
+        enabled_notifiers = [notifier for notifier in notifiers if notifier and notifier.enabled]
+        if event in notified_events or not enabled_notifiers:
             return
         notified_events.add(event)
-        try:
-            result = await asyncio.to_thread(notifier.send, title, content)
-            print(f"[notify] PushPlus 已提交：{event} {result[:120]}")
-        except Exception as exc:
-            print(f"[notify] PushPlus 发送失败：{event} {exc}")
+        for notifier in enabled_notifiers:
+            name = str(getattr(notifier, "name", notifier.__class__.__name__))
+            try:
+                await asyncio.to_thread(notifier.send, title, content)
+                print(f"[notify] {name} 已提交：{event}")
+            except Exception as exc:
+                print(f"[notify] {name} 发送失败：{event} {exc}")
 
     @property
     def texts(self) -> dict[str, list[str]]:
