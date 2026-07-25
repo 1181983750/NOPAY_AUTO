@@ -9,28 +9,33 @@ from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, 
 
 
 class PendingStateTests(unittest.TestCase):
-    def test_replace_numeric_uses_playwright_keyboard_type(self) -> None:
+    def test_replace_numeric_uses_playwright_insert_text(self) -> None:
         class FakeKeyboard:
             def __init__(self) -> None:
                 self.presses: list[str] = []
-                self.typed: list[tuple[str, int]] = []
+                self.inserted: list[str] = []
 
             async def press(self, key: str) -> None:
                 self.presses.append(key)
 
-            async def type(self, value: str, delay: int = 0) -> None:
-                self.typed.append((value, delay))
+            async def insert_text(self, value: str) -> None:
+                self.inserted.append(value)
 
         class FakePage:
             def __init__(self) -> None:
                 self.keyboard = FakeKeyboard()
 
+            async def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
         browser = BrowserSession.__new__(BrowserSession)
         browser.page = FakePage()
+        browser.focus_flutter_text_input = lambda: asyncio.sleep(0, result=True)
+        browser.active_text_input_value = lambda: asyncio.sleep(0, result="1500")
 
-        asyncio.run(browser.replace_numeric("1500"))
+        self.assertTrue(asyncio.run(browser.replace_numeric("1500")))
 
-        self.assertEqual(browser.page.keyboard.typed, [("1500", 40)])
+        self.assertEqual(browser.page.keyboard.inserted, ["1500"])
 
     def test_multi_order_plans_remaining_balance_and_rotates_card_keywords(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

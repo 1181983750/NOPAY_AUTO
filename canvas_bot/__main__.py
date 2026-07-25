@@ -533,9 +533,15 @@ class BrowserSession:
                 };
                 const active = document.activeElement;
                 const inputs = [...document.querySelectorAll('input, textarea')].filter(isEditable);
-                const target = isEditable(active)
-                    ? active
-                    : inputs.find((element) => element.classList.contains('flt-text-editing-input')) || inputs.at(-1);
+                // A Flutter page can leave an unrelated HTML field active. Always
+                // prefer Flutter's editing input after the canvas field itself was
+                // clicked; otherwise Playwright types successfully into the wrong
+                // DOM element while the visual form remains empty.
+                const flutterInputs = inputs.filter((element) =>
+                    element.classList.contains('flt-text-editing-input') ||
+                    Boolean(element.closest('flt-glass-pane, flutter-view'))
+                );
+                const target = flutterInputs.at(-1) || (isEditable(active) ? active : inputs.at(-1));
                 if (!target) return false;
                 target.focus({ preventScroll: true });
                 return document.activeElement === target;
@@ -580,17 +586,18 @@ class BrowserSession:
         )
         return bool(result)
 
-    async def replace_numeric(self, text: str) -> None:
-        """Replace a numeric Flutter canvas field using reliable key events."""
+    async def replace_numeric(self, text: str) -> bool:
+        """Replace a numeric Flutter canvas field and confirm the hidden value changed."""
         assert self.page is not None
         value = "".join(char for char in str(text) if char.isdigit() or char == ".")
         if not value:
-            return
+            return False
         try:
-            await self.focus_flutter_text_input()
+            focused = await self.focus_flutter_text_input()
         except Exception:
-            # Canvas OCR verification below remains the final authority.
-            pass
+            return False
+        if not focused:
+            return False
         await self.page.keyboard.press("ControlOrMeta+A")
         await self.page.keyboard.press("Backspace")
         # Some Flutter web inputs do not honor Control+A consistently. Select
@@ -600,18 +607,19 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         for _ in range(24):
             await self.page.keyboard.press("Backspace")
-        # Flutter's hidden text input handles Playwright's type events more
-        # consistently than isolated press events, especially after the
-        # amount field was updated through the 全部 action.
-        await self.page.keyboard.type(value, delay=40)
+        # ``insert_text`` emits an input event directly. Some Flutter engines
+        # ignore synthetic key events from ``type`` even though the hidden input
+        # has focus, leaving the canvas field visibly empty.
+        await self.page.keyboard.insert_text(value)
         try:
             await self.page.wait_for_timeout(120)
             if await self.active_text_input_value() != value:
-                await self.set_active_text_input_value(value)
+                if not await self.set_active_text_input_value(value):
+                    return False
+                await self.page.wait_for_timeout(80)
+            return await self.active_text_input_value() == value
         except Exception:
-            # A page version without a DOM editing input still gets the normal
-            # Playwright keyboard path and the caller's OCR verification.
-            pass
+            return False
 
     async def press(self, key: str) -> None:
         assert self.page is not None
@@ -1801,7 +1809,8 @@ class CanvasBot:
             x, y = target
             await browser.click_abs(rect.left + x, rect.top + y)
             await asyncio.sleep(0.16)
-            await browser.replace_numeric(str(value))
+            if not await browser.replace_numeric(str(value)):
+                print(f"[warn] 未获得{label}的 Flutter 输入焦点，准备重试。")
             await asyncio.sleep(0.40)
 
             _, verify_image, verify_boxes = await self.scan_app(browser)
