@@ -63,6 +63,40 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(bot.prepare_multi_order_values(Decimal("999.99")))
         self.assertTrue(bot.multi_batch_complete)
 
+    def test_form_balance_replans_stale_multi_order_to_use_all(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"amount": "3000", "limit_min": "1000", "limit_max": "3000"}
+        bot.multi_batch_complete = False
+        bot.form_values = {
+            "amount": "3000",
+            "limit_min": "1000",
+            "limit_max": "3000",
+            "use_all_balance": "false",
+        }
+
+        self.assertTrue(bot.replan_form_values_for_current_balance(Decimal("1816.75"), "3000"))
+        self.assertEqual(
+            bot.form_values,
+            {"amount": "1816.75", "limit_min": "1000", "limit_max": "1816", "use_all_balance": "true"},
+        )
+
+    def test_form_balance_below_minimum_refuses_stale_multi_order(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}
+        bot.multi_batch_complete = False
+        bot.form_values = {"amount": "3000", "use_all_balance": "false"}
+
+        self.assertFalse(bot.replan_form_values_for_current_balance(Decimal("1164.6"), "3000"))
+        self.assertTrue(bot.multi_batch_complete)
+
+    def test_matching_configured_amount_and_maximum_can_keep_form_default(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"amount": "3000", "limit_max": "3000.00"}
+        self.assertTrue(bot.configured_amount_matches_limit_max())
+
+        bot.cfg["limit_max"] = "2800"
+        self.assertFalse(bot.configured_amount_matches_limit_max())
+
     def test_balance_reader_uses_top_balance_not_historical_order_amount(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"texts": {"balance": ["搬砖余额"]}}

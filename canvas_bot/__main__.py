@@ -872,9 +872,33 @@ class CanvasBot:
         }
         return True
 
+    def replan_form_values_for_current_balance(self, balance: Decimal, planned_amount: str) -> bool:
+        """Refresh a stale multi-order plan using the balance rendered on the form itself."""
+        planned = self.parse_money(planned_amount)
+        if planned is None or balance >= planned:
+            return True
+        print(
+            "[state] 变现表单余额 "
+            f"{self.decimal_text(balance)} 小于计划金额 {self.decimal_text(planned)}，重新规划本次挂单。"
+        )
+        if not self.prepare_multi_order_values(balance):
+            print("[state] 表单实时余额低于配置最小限额，返回搬砖页等待余额恢复。")
+            return False
+        print(f"[action] 表单余额不足计划金额，改用变现金额全部：{self.form_values['amount']}")
+        return True
+
     def can_act(self) -> bool:
         throttle = float(self.cfg.get("action_throttle_sec", 1.2))
-        return time.time() - self.last_action_at >= max(0.7, throttle)
+        floor = 0.45 if str(self.cfg.get("speed_mode") or "safe").lower() == "fast" else 0.7
+        return time.time() - self.last_action_at >= max(floor, throttle)
+
+    def form_input_timing(self) -> tuple[float, float]:
+        """Return focus and OCR-verification waits for the selected speed profile."""
+        cfg = self.cfg.get("form_input", {})
+        return (
+            max(0.08, float(cfg.get("focus_wait_sec", 0.16))),
+            max(0.15, float(cfg.get("verify_wait_sec", 0.40))),
+        )
 
     def record_action(self, message: str) -> None:
         self.last_action_at = time.time()
@@ -1816,6 +1840,7 @@ class CanvasBot:
             return False
 
         self.record_action(f"按文字定位填写{label}")
+        focus_wait, verify_wait = self.form_input_timing()
         for attempt in range(2):
             if attempt:
                 self.record_action(f"重新填写{label}（第 {attempt + 1} 次）")
@@ -1827,10 +1852,10 @@ class CanvasBot:
                     return False
             x, y = target
             await browser.click_abs(rect.left + x, rect.top + y)
-            await asyncio.sleep(0.16)
+            await asyncio.sleep(focus_wait)
             if not await browser.replace_numeric(str(value)):
                 print(f"[warn] 未获得{label}的 Flutter 输入焦点，准备重试。")
-            await asyncio.sleep(0.40)
+            await asyncio.sleep(verify_wait)
 
             _, verify_image, verify_boxes = await self.scan_app(browser)
             if self.is_field_value_visible(verify_boxes, str(value), target, verify_image):
@@ -1841,6 +1866,26 @@ class CanvasBot:
 
         await self.save_action_debug(verify_image, verify_boxes, f"field_{label}_not_verified")
         print(f"[warn] 未在{label}输入框确认数值 {value}，停止本次挂单。")
+        return False
+
+    def configured_amount_matches_limit_max(self) -> bool:
+        """The app defaults 最大限额 to the amount only for this matching configuration."""
+        configured_amount = self.parse_money(str(self.cfg.get("amount") or ""))
+        configured_maximum = self.parse_money(str(self.cfg.get("limit_max") or ""))
+        return configured_amount is not None and configured_amount == configured_maximum
+
+    async def keep_default_canvas_limit_max(self, browser: BrowserSession, expected: str) -> bool:
+        """Retain the app-provided maximum only after a visual value check."""
+        rect, image, boxes = await self.scan_app(browser)
+        target = self.resolve_canvas_field_target(
+            image,
+            boxes,
+            self.texts.get("limit_label", ["单笔限额"]),
+            0.74,
+        )
+        if target and self.is_field_value_visible(boxes, expected, target, image):
+            print(f"[state] 最大限额已自动同步变现金额：{expected}，跳过填写")
+            return True
         return False
 
     async def fill_canvas_all_balance(self, browser: BrowserSession, expected_amount: str) -> bool:
@@ -2164,6 +2209,19 @@ class CanvasBot:
             print("[warn] 请先在 configs/qjd67.json 填写 amount。")
             return True
 
+        # The available balance can change between clicking 开始搬砖 and the
+        # form becoming interactive (for example when another pending order is
+        # settled). Re-read the balance rendered by this form before typing so
+        # a stale 3000 plan does not exceed a now-smaller available balance.
+        if self.multi_order_enabled():
+            _, form_image, form_boxes = await self.scan_app(browser)
+            form_balance = self.find_available_balance(form_image, form_boxes)
+            if form_balance is not None and not self.replan_form_values_for_current_balance(form_balance, amount):
+                self.form_submission_failed = True
+                return True
+            values = self.form_values
+            amount = values.get("amount") or amount
+
         fill_amount = (
             self.fill_canvas_all_balance(browser, amount)
             if values.get("use_all_balance") == "true"
@@ -2187,12 +2245,17 @@ class CanvasBot:
         ):
             self.form_submission_failed = True
             return True
-        if not await self.fill_canvas_text_field(
+        limit_max = values.get("limit_max") or str(self.cfg.get("limit_max") or "")
+        max_is_default = self.configured_amount_matches_limit_max() and await self.keep_default_canvas_limit_max(
+            browser,
+            limit_max,
+        )
+        if not max_is_default and not await self.fill_canvas_text_field(
             browser,
             "最大限额",
             self.texts.get("limit_label", ["单笔限额"]),
             0.74,
-            values.get("limit_max") or str(self.cfg.get("limit_max") or ""),
+            limit_max,
         ):
             self.form_submission_failed = True
             return True

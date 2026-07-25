@@ -50,6 +50,21 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertNotIn("minimum_remaining_balance", updated["multi_order"])
         self.assertEqual(updated["password"]["value"], "")
 
+    def test_fast_speed_profile_updates_only_reversible_timing(self) -> None:
+        values = public_config(self.cfg)
+        values["speed_mode"] = "fast"
+
+        updated = validate_dashboard_settings(self.cfg, values)
+
+        self.assertEqual(updated["speed_mode"], "fast")
+        self.assertEqual(updated["poll_interval_sec"], 0.5)
+        self.assertEqual(updated["action_throttle_sec"], 0.45)
+        self.assertEqual(updated["submit_flow"]["secondary_confirm_delay_sec"], 0.35)
+        self.assertEqual(updated["submit_flow"]["state_poll_sec"], 0.25)
+        self.assertEqual(updated["form_input"], {"focus_wait_sec": 0.12, "verify_wait_sec": 0.25})
+        self.assertEqual(updated["cancel_flow"]["confirm_delay_sec"], 1.2)
+        self.assertEqual(updated["submit_flow"]["password_timeout_sec"], 8.0)
+
     def test_public_config_never_returns_password_value(self) -> None:
         cfg = json.loads(json.dumps(self.cfg))
         cfg["password"]["value"] = "secret"
