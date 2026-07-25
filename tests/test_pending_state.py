@@ -800,6 +800,27 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(target[0], 253.0)
         self.assertGreater(target[1], label.bottom)
 
+    def test_field_target_prefers_existing_numeric_value_on_the_input_row(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"texts": {"limit_label": ["单笔限额"]}}
+
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (550, 1018), "white")
+        label = TextBox("单笔限额", 0.99, 37, 415, 125, 441)
+        default_minimum = TextBox("10", 0.99, 48, 476, 78, 500)
+        default_maximum = TextBox("3000", 0.99, 313, 477, 365, 499)
+
+        target = bot.resolve_canvas_field_target(
+            image,
+            [label, default_minimum, default_maximum],
+            ["单笔限额"],
+            0.26,
+        )
+
+        self.assertEqual(target, default_minimum.center)
+
     def test_field_value_validation_accepts_left_aligned_input_text(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         image = Image.new("RGB", (506, 900), "white")

@@ -1445,7 +1445,26 @@ class CanvasBot:
         input_y = label.bottom + clamp(height * 0.06, 36, 68)
         if input_y >= height - 18:
             return None
-        return width * clamp(x_ratio, 0.08, 0.92), input_y
+        default_x = width * clamp(x_ratio, 0.08, 0.92)
+
+        # The limit fields sometimes keep their platform default (for example
+        # ``10``) in a narrow editable hit area even though their outlined box
+        # spans a much wider region. Prefer that existing numeric value when it
+        # is on the expected row; an empty field keeps the original midpoint.
+        numeric_candidates = [
+            box
+            for box in boxes
+            if re.sub(r"\D", "", box.text)
+            and abs(box.center[1] - input_y) <= height * 0.055
+            and abs(box.center[0] - default_x) <= width * 0.25
+        ]
+        if numeric_candidates:
+            closest = min(
+                numeric_candidates,
+                key=lambda box: abs(box.center[0] - default_x) + abs(box.center[1] - input_y),
+            )
+            return closest.center
+        return default_x, input_y
 
     def is_field_value_visible(
         self,
