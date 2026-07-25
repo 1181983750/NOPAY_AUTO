@@ -398,6 +398,11 @@ class PendingStateTests(unittest.TestCase):
         bot.save_action_debug = save_debug
         bot.click_visual_target = click_target
 
+        async def unexpected_notification(*_args) -> None:
+            raise AssertionError("交易通知不应触发 PushPlus")
+
+        bot.notify_once = unexpected_notification
+
         self.assertTrue(asyncio.run(bot.handle_incoming_order(FakeBrowser(), Rect(0, 0, 506, 900), image, [notification, accept])))
         self.assertEqual(clicked, ["同意交易"])
         self.assertEqual(bot.form_expected_until, 0)
@@ -423,6 +428,11 @@ class PendingStateTests(unittest.TestCase):
         vision.find_template = lambda image, name: None
         bot.vision = vision
         bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+
+        async def unexpected_notification(*_args) -> None:
+            raise AssertionError("订单异常不应触发 PushPlus")
+
+        bot.notify_once = unexpected_notification
 
         async def click_target(_browser, _rect, target) -> None:
             clicked.append(target.text)

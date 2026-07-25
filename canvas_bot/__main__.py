@@ -641,9 +641,76 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         await self.page.keyboard.insert_text(str(text))
 
+    async def focus_flutter_text_input(self) -> bool:
+        """Focus Flutter's invisible editing input after a canvas field click."""
+        assert self.page is not None
+        result = await self.page.evaluate(
+            """() => {
+                const isEditable = (element) => {
+                    if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return false;
+                    const type = (element.getAttribute('type') || 'text').toLowerCase();
+                    return !element.disabled && !element.readOnly && !['hidden', 'button', 'checkbox', 'radio', 'file', 'submit'].includes(type);
+                };
+                const active = document.activeElement;
+                const inputs = [...document.querySelectorAll('input, textarea')].filter(isEditable);
+                const target = isEditable(active)
+                    ? active
+                    : inputs.find((element) => element.classList.contains('flt-text-editing-input')) || inputs.at(-1);
+                if (!target) return false;
+                target.focus({ preventScroll: true });
+                return document.activeElement === target;
+            }"""
+        )
+        return bool(result)
+
+    async def active_text_input_value(self) -> str | None:
+        """Read the current Flutter editing value without relying on canvas OCR."""
+        assert self.page is not None
+        value = await self.page.evaluate(
+            """() => {
+                const active = document.activeElement;
+                if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement)) return null;
+                return active.value;
+            }"""
+        )
+        return None if value is None else str(value)
+
+    async def set_active_text_input_value(self, value: str) -> bool:
+        """Dispatch standard input events when Flutter ignored keyboard key events."""
+        assert self.page is not None
+        result = await self.page.evaluate(
+            """(nextValue) => {
+                const active = document.activeElement;
+                if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement)) return false;
+                const prototype = active instanceof HTMLInputElement
+                    ? HTMLInputElement.prototype
+                    : HTMLTextAreaElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                if (!setter) return false;
+                setter.call(active, nextValue);
+                active.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    inputType: 'insertText',
+                    data: nextValue,
+                }));
+                active.dispatchEvent(new Event('change', { bubbles: true }));
+                return active.value === nextValue;
+            }""",
+            value,
+        )
+        return bool(result)
+
     async def replace_numeric(self, text: str) -> None:
         """Replace a numeric Flutter canvas field using reliable key events."""
         assert self.page is not None
+        value = "".join(char for char in str(text) if char.isdigit() or char == ".")
+        if not value:
+            return
+        try:
+            await self.focus_flutter_text_input()
+        except Exception:
+            # Canvas OCR verification below remains the final authority.
+            pass
         await self.page.keyboard.press("ControlOrMeta+A")
         await self.page.keyboard.press("Backspace")
         # Some Flutter web inputs do not honor Control+A consistently. Select
@@ -653,12 +720,18 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         for _ in range(24):
             await self.page.keyboard.press("Backspace")
-        value = "".join(char for char in str(text) if char.isdigit() or char == ".")
-        if value:
-            # Flutter's hidden text input handles Playwright's type events more
-            # consistently than isolated press events, especially after the
-            # amount field was updated through the 全部 action.
-            await self.page.keyboard.type(value, delay=40)
+        # Flutter's hidden text input handles Playwright's type events more
+        # consistently than isolated press events, especially after the
+        # amount field was updated through the 全部 action.
+        await self.page.keyboard.type(value, delay=40)
+        try:
+            await self.page.wait_for_timeout(120)
+            if await self.active_text_input_value() != value:
+                await self.set_active_text_input_value(value)
+        except Exception:
+            # A page version without a DOM editing input still gets the normal
+            # Playwright keyboard path and the caller's OCR verification.
+            pass
 
     async def press(self, key: str) -> None:
         assert self.page is not None
@@ -1591,7 +1664,6 @@ class CanvasBot:
         now = time.time()
         notification = self.find_trade_notification(image, boxes)
         if notification:
-            await self.notify_once("trade_notification", "收到交易通知", "检测到新的交易通知，请及时处理。")
             if not self.cfg.get("auto_accept", True):
                 print("[state] 检测到交易通知，自动接单已关闭。")
                 return True
@@ -1707,7 +1779,6 @@ class CanvasBot:
         boxes: list[TextBox],
     ) -> bool:
         """Dismiss the timeout reminder without opening its detail page."""
-        await self.notify_once("order_exception", "订单异常", "检测到订单异常提醒，请及时检查。")
         target = self.find_order_exception_ignore(image, boxes)
         if not target:
             await self.save_action_debug(image, boxes, "order_exception_ignore_not_found")
