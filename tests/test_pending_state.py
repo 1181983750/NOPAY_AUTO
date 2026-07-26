@@ -546,6 +546,39 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(bot.post_accept_order_check, "open")
         self.assertGreater(bot.post_accept_order_check_until, time.time())
 
+    def test_system_notice_dialog_closes_only_recognized_upper_right_icon(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.clicks: list[tuple[float, float]] = []
+
+            async def click_abs(self, x: float, y: float) -> None:
+                self.clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.1, "texts": {"system_notice": ["安全通知"]}}
+        bot.last_action_at = 0.0
+        bot.last_system_notice_close_at = 0.0
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        image = Image.new("RGB", (595, 726), "white")
+        boxes = [
+            TextBox("安全通知", 0.99, 250, 235, 346, 260),
+            TextBox("系统检测您目前交易存在安全隐患", 0.99, 150, 310, 450, 342),
+            TextBox("确认转账", 0.99, 210, 420, 330, 450),
+        ]
+        browser = FakeBrowser()
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "system_notice_dialog")
+        self.assertTrue(
+            asyncio.run(bot.handle_system_notice_dialog(browser, Rect(100, 200, 595, 726), image, boxes))
+        )
+        self.assertEqual(len(browser.clicks), 1)
+        x, y = browser.clicks[0]
+        self.assertAlmostEqual(x, 538.0, delta=2.0)
+        self.assertAlmostEqual(y, 427.0, delta=2.0)
+
     def test_post_accept_check_timeout_releases_orders_page_flow(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.post_accept_order_check = "inspect"

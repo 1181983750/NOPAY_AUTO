@@ -646,6 +646,7 @@ class CanvasBot:
         self.last_waiting_transfer_back_at = 0.0
         self.last_post_accept_detail_back_at = 0.0
         self.last_exception_ignore_at = 0.0
+        self.last_system_notice_close_at = 0.0
         self.post_accept_order_check = ""
         self.post_accept_order_check_until = 0.0
         self.last_cancel_at = 0.0
@@ -1083,6 +1084,22 @@ class CanvasBot:
             bounds=(width * 0.20, height * 0.58, width * 0.80, height * 0.92),
         )
 
+    def find_system_notice_dialog(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | None:
+        """Recognize the informational system-notice sheet by its own central title.
+
+        The notice can contain warning language such as ``确认转账``.  It is not an
+        order confirmation, so it must be routed before generic confirmation guards.
+        The handler only uses its close icon and never any button inside the sheet.
+        """
+        width, height = image.size
+        return self.vision.find_text(
+            boxes,
+            self.texts.get("system_notice", ["安全通知"]),
+            prefer_center=True,
+            max_text_length=16,
+            bounds=(width * 0.20, height * 0.16, width * 0.80, height * 0.52),
+        )
+
     def find_submit_confirm_dialog(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | None:
         """Find the bottom-sheet confirmation shown after submitting a cash-out form."""
         width, height = image.size
@@ -1279,6 +1296,8 @@ class CanvasBot:
 
     def classify_visual_page(self, image: Image.Image, boxes: list[TextBox]) -> str:
         """Classify the visible Flutter page before deciding which actions are allowed."""
+        if self.find_system_notice_dialog(image, boxes):
+            return "system_notice_dialog"
         if self.find_submit_confirm_dialog(image, boxes):
             return "submit_confirm_dialog"
         if self.find_trade_success_ack(image, boxes):
@@ -1321,6 +1340,7 @@ class CanvasBot:
             return
         self.last_visual_page = page
         labels = {
+            "system_notice_dialog": "系统安全通知",
             "password_dialog": "支付密码弹窗",
             "submit_confirm_dialog": "变现二次确认弹窗",
             "trade_success_dialog": "交易成功提示",
@@ -1914,6 +1934,35 @@ class CanvasBot:
         # order list instead of leaving a stale inspect state behind.
         self.post_accept_order_check = "open"
         self.post_accept_order_check_until = now + 10.0
+        return True
+
+    async def handle_system_notice_dialog(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Dismiss only the upper-right close icon of the recognized system notice."""
+        title = self.find_system_notice_dialog(image, boxes)
+        if not title:
+            return True
+        now = time.time()
+        last_close = getattr(self, "last_system_notice_close_at", 0.0)
+        if now - last_close < 0.8 or not self.can_act():
+            return True
+
+        width, height = image.size
+        # The close glyph is not OCR text.  Its position is stable relative to the
+        # central “安全通知” title, and this point is used only after that title is
+        # recognized in the modal area.
+        title_x, title_y = title.center
+        close_x = clamp(title_x + width * 0.235, width * 0.58, width * 0.92)
+        close_y = clamp(title_y - height * 0.028, height * 0.10, height * 0.45)
+        await self.save_action_debug(image, boxes, "system_notice_close")
+        self.record_action("系统安全通知，点击右上角关闭")
+        self.last_system_notice_close_at = now
+        await browser.click_abs(rect.left + close_x, rect.top + close_y)
         return True
 
     async def handle_submit_confirm_dialog(
