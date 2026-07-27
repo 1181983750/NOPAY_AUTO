@@ -92,6 +92,23 @@ class PendingStateTests(unittest.TestCase):
             {"amount": "1816.75", "limit_min": "1000", "limit_max": "1816", "use_all_balance": "true"},
         )
 
+    def test_form_balance_replans_existing_all_order_when_balance_increases(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}
+        bot.multi_batch_complete = False
+        bot.form_values = {
+            "amount": "3000.81",
+            "limit_min": "1500",
+            "limit_max": "3000",
+            "use_all_balance": "true",
+        }
+
+        self.assertTrue(bot.replan_form_values_for_current_balance(Decimal("4010.81"), "3000.81"))
+        self.assertEqual(
+            bot.form_values,
+            {"amount": "4010.81", "limit_min": "1500", "limit_max": "4010", "use_all_balance": "true"},
+        )
+
     def test_form_balance_below_minimum_refuses_stale_multi_order(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}

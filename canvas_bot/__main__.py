@@ -959,16 +959,27 @@ class CanvasBot:
     def replan_form_values_for_current_balance(self, balance: Decimal, planned_amount: str) -> bool:
         """Refresh a stale multi-order plan using the balance rendered on the form itself."""
         planned = self.parse_money(planned_amount)
-        if planned is None or balance >= planned:
+        uses_all_balance = self.form_values.get("use_all_balance") == "true"
+        # A plan that uses 全部 is tied to the live form balance.  The balance can
+        # increase while the page opens (for example, a previous order settles),
+        # so keeping the old smaller plan would make the later visual check reject
+        # a correctly filled 全部 amount.
+        if planned is None or (balance >= planned and (not uses_all_balance or balance == planned)):
             return True
-        print(
-            "[state] 变现表单余额 "
-            f"{self.decimal_text(balance)} 小于计划金额 {self.decimal_text(planned)}，重新规划本次挂单。"
-        )
+        if balance < planned:
+            print(
+                "[state] 变现表单余额 "
+                f"{self.decimal_text(balance)} 小于计划金额 {self.decimal_text(planned)}，重新规划本次挂单。"
+            )
+        else:
+            print(
+                "[state] 变现表单余额变为 "
+                f"{self.decimal_text(balance)}，同步全部变现金额与最大限额。"
+            )
         if not self.prepare_multi_order_values(balance):
             print("[state] 表单实时余额低于配置最小限额，返回搬砖页等待余额恢复。")
             return False
-        print(f"[action] 表单余额不足计划金额，改用变现金额全部：{self.form_values['amount']}")
+        print(f"[action] 本次使用变现金额全部：{self.form_values['amount']}")
         return True
 
     def can_act(self) -> bool:
@@ -2199,16 +2210,36 @@ class CanvasBot:
         await self.click_visual_target(browser, rect, target)
         await asyncio.sleep(0.28)
         _, verify_image, verify_boxes = await self.scan_app(browser)
-        if self.is_field_value_visible(verify_boxes, expected_amount, field, verify_image):
-            print(f"[state] 已确认变现金额全部显示为 {expected_amount}")
-            return True
-        try:
-            rounded_amount = self.decimal_text(Decimal(str(expected_amount)).to_integral_value(rounding=ROUND_DOWN))
-        except InvalidOperation:
-            rounded_amount = ""
-        if rounded_amount and self.is_field_value_visible(verify_boxes, rounded_amount, field, verify_image):
-            print(f"[state] 页面将全部金额取整为 {rounded_amount}，继续填写限额")
-            return True
+        actual_balance = self.find_available_balance(verify_image, verify_boxes)
+        expected_values = [str(expected_amount)]
+        if actual_balance is not None:
+            actual_text = self.decimal_text(actual_balance)
+            expected_values.append(actual_text)
+            # Keep the remaining form steps aligned with the app's live balance.
+            # The amount field is rendered as an integer while the balance can
+            # still include cents, so the maximum limit follows the rounded value.
+            if self.form_values.get("use_all_balance") == "true":
+                self.form_values["amount"] = actual_text
+                self.form_values["limit_max"] = self.decimal_text(
+                    actual_balance.to_integral_value(rounding=ROUND_DOWN)
+                )
+        rounded_values: list[str] = []
+        for value in expected_values:
+            try:
+                rounded = self.decimal_text(Decimal(value).to_integral_value(rounding=ROUND_DOWN))
+            except InvalidOperation:
+                continue
+            if rounded not in rounded_values:
+                rounded_values.append(rounded)
+
+        for value in expected_values:
+            if self.is_field_value_visible(verify_boxes, value, field, verify_image):
+                print(f"[state] 已确认变现金额全部显示为 {value}")
+                return True
+        for value in rounded_values:
+            if self.is_field_value_visible(verify_boxes, value, field, verify_image):
+                print(f"[state] 页面将全部金额取整为 {value}，继续填写限额")
+                return True
         await self.save_action_debug(verify_image, verify_boxes, "amount_all_not_verified")
         print(f"[warn] 点击全部后未确认变现金额 {expected_amount}，停止本次挂单。")
         return False
