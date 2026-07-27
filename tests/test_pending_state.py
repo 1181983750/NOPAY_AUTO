@@ -118,6 +118,34 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(bot.replan_form_values_for_current_balance(Decimal("1164.6"), "3000"))
         self.assertTrue(bot.multi_batch_complete)
 
+    def test_withdraw_unavailable_page_uses_dynamic_left_back_position(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.relative_clicks: list[tuple[float, float]] = []
+
+            async def click_relative(self, _rect, x: float, y: float) -> None:
+                self.relative_clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.1, "points": {"order_detail_back": [0.08, 0.04]}}
+        bot.last_action_at = 0.0
+        bot.last_withdraw_unavailable_back_at = 0.0
+        image = Image.new("RGB", (608, 730), "white")
+        boxes = [
+            TextBox("搬砖余额", 0.99, 20, 92, 120, 122),
+            TextBox("0.81", 0.99, 132, 92, 180, 122),
+            TextBox("您的可变现余额不足10", 0.99, 180, 520, 440, 550),
+        ]
+        browser = FakeBrowser()
+
+        self.assertTrue(
+            asyncio.run(bot.handle_withdraw_unavailable_page(browser, Rect(0, 0, 608, 730), image, boxes))
+        )
+        self.assertEqual(len(browser.relative_clicks), 1)
+        x, y = browser.relative_clicks[0]
+        self.assertAlmostEqual(x, 26.08 / 608, places=3)
+        self.assertEqual(y, 0.04)
+
     def test_matching_configured_amount_and_maximum_can_keep_form_default(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"amount": "3000", "limit_max": "3000.00"}
@@ -699,6 +727,30 @@ class PendingStateTests(unittest.TestCase):
         self.assertTrue(asyncio.run(bot.handle_unknown_page(browser, Rect(0, 0, 506, 900), image, [])))
         self.assertEqual(browser.reloads, 1)
         self.assertEqual(bot.unknown_page_streak, 0)
+
+    def test_unknown_page_saves_one_diagnostic_before_reload(self) -> None:
+        class FakeBrowser:
+            async def reload(self) -> None:
+                return None
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "unknown_page_refresh": {"consecutive_scans": 6, "cooldown_sec": 20},
+            "diagnostics": {"capture_unknown_after_scans": 3},
+        }
+        bot.unknown_page_streak = 2
+        bot.last_unknown_page_reload_at = 0.0
+        saved: list[str] = []
+
+        async def save_debug(_image, _boxes, note, *, force=False) -> None:
+            if force:
+                saved.append(note)
+
+        bot.maybe_save_debug = save_debug
+        image = Image.new("RGB", (506, 900), "white")
+
+        self.assertTrue(asyncio.run(bot.handle_unknown_page(FakeBrowser(), Rect(0, 0, 506, 900), image, [])))
+        self.assertEqual(saved, ["unknown_page"])
 
     def test_page_classifier_prefers_withdraw_form_over_visible_navigation(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

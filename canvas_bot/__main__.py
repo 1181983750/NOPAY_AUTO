@@ -28,7 +28,9 @@ from .services.pushplus import PushPlusNotifier
 from .services.telegram import TelegramNotifier
 
 
-ROOT = Path(__file__).resolve().parents[1]
+# See ``core.text.ROOT``: packaged builds use the directory containing the EXE
+# so editable config and browser state remain outside the temporary bundle.
+ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 
 
 def now_ms() -> int:
@@ -56,6 +58,94 @@ def is_chrome_running() -> bool:
     except Exception:
         return False
     return "chrome.exe" in result.stdout.lower()
+
+
+class RuntimeMonitor:
+    """Periodically report the cost and memory footprint of the running bot.
+
+    The monitor is deliberately log-only: it does not retain screenshots or OCR
+    data, and its Windows process query runs off the asyncio event loop.
+    """
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        monitor_cfg = cfg.get("performance_monitor", {})
+        self.enabled = bool(monitor_cfg.get("enabled", True))
+        try:
+            self.interval_sec = max(10.0, float(monitor_cfg.get("interval_sec", 60)))
+        except (TypeError, ValueError):
+            self.interval_sec = 60.0
+        self.last_report_at = 0.0
+        self.last_screenshot_sec: float | None = None
+        self.last_ocr_sec: float | None = None
+
+        profile_cfg = cfg.get("browser_profile", {})
+        profile_mode = str(profile_cfg.get("mode", "managed")).lower()
+        self.managed_profile_dir: Path | None = None
+        if profile_mode not in {"system", "user", "user_profile", "system_profile"}:
+            self.managed_profile_dir = resolve_path(cfg.get("user_data_dir", ".browser-profile/qjd67"))
+
+    def record_scan(self, screenshot_sec: float, ocr_sec: float) -> None:
+        self.last_screenshot_sec = screenshot_sec
+        self.last_ocr_sec = ocr_sec
+
+    def memory_snapshot_mb(self) -> tuple[float | None, float | None]:
+        """Return Python RSS and this managed Chrome profile's RSS on Windows."""
+        if os.name != "nt":
+            return None, None
+
+        profile = str(self.managed_profile_dir) if self.managed_profile_dir else ""
+        # Keep the command data-only and pass the profile via the environment so
+        # unusual characters in a path cannot alter the PowerShell program.
+        environment = os.environ.copy()
+        environment["QJD67_MONITOR_PROFILE"] = profile
+        environment["QJD67_MONITOR_PID"] = str(os.getpid())
+        script = (
+            "$ErrorActionPreference = 'Stop'; "
+            "$processId = [int]$env:QJD67_MONITOR_PID; "
+            "$python = (Get-Process -Id $processId).WorkingSet64; "
+            "$profile = $env:QJD67_MONITOR_PROFILE; "
+            "$chrome = 0; "
+            "if ($profile) { $chrome = (Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+            "Where-Object { $_.CommandLine -like ('*--user-data-dir=' + $profile + '*') } | "
+            "Measure-Object -Property WorkingSetSize -Sum).Sum }; "
+            "@{ python_rss = $python; chrome_rss = $chrome } | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                env=environment,
+            )
+            if result.returncode:
+                return None, None
+            values = json.loads(result.stdout)
+            python_rss = float(values.get("python_rss", 0)) / (1024 * 1024)
+            chrome_rss = float(values.get("chrome_rss", 0)) / (1024 * 1024)
+            return python_rss, chrome_rss if self.managed_profile_dir else None
+        except Exception:
+            return None, None
+
+    async def report_if_due(self, tick_sec: float) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if now - self.last_report_at < self.interval_sec:
+            return
+        self.last_report_at = now
+        python_rss, chrome_rss = await asyncio.to_thread(self.memory_snapshot_mb)
+        parts = [f"tick={tick_sec:.2f}s"]
+        if self.last_screenshot_sec is not None:
+            parts.append(f"screenshot={self.last_screenshot_sec:.2f}s")
+        if self.last_ocr_sec is not None:
+            parts.append(f"ocr={self.last_ocr_sec:.2f}s")
+        if python_rss is not None:
+            parts.append(f"python_rss={python_rss:.0f}MB")
+        if chrome_rss is not None:
+            parts.append(f"managed_chrome_rss={chrome_rss:.0f}MB")
+        print("[perf] " + " ".join(parts))
 
 
 class VisionEngine:
@@ -630,6 +720,7 @@ class BrowserSession:
 class CanvasBot:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
+        self.runtime_monitor = RuntimeMonitor(cfg)
         self.vision = VisionEngine(cfg)
         self.pushplus = PushPlusNotifier()
         self.telegram = TelegramNotifier()
@@ -677,6 +768,7 @@ class CanvasBot:
         self.last_orders_refresh_at = 0.0
         self.unknown_page_streak = 0
         self.last_unknown_page_reload_at = 0.0
+        self.last_tick_error_capture_at = 0.0
         self.last_password_input_at = 0.0
         self.password_dialog_input_pending = False
         self._state_log_times: dict[str, float] = {}
@@ -842,6 +934,19 @@ class CanvasBot:
         except (TypeError, ValueError):
             cooldown = 20.0
         return max(2, min(scans, 30)), max(5.0, cooldown)
+
+    def diagnostics_cfg(self) -> tuple[int, float]:
+        """Return bounded diagnostic capture thresholds without retaining page data."""
+        cfg = self.cfg.get("diagnostics", {})
+        try:
+            unknown_after_scans = int(cfg.get("capture_unknown_after_scans", 3))
+        except (TypeError, ValueError):
+            unknown_after_scans = 3
+        try:
+            error_cooldown_sec = float(cfg.get("error_capture_cooldown_sec", 30))
+        except (TypeError, ValueError):
+            error_cooldown_sec = 30.0
+        return max(2, min(unknown_after_scans, 10)), max(10.0, error_cooldown_sec)
 
     def payment_keywords(self) -> list[str]:
         multi_keywords = self.multi_order_cfg().get("payment_keywords")
@@ -1678,7 +1783,10 @@ class CanvasBot:
         anchors = [
             box.left
             for box in boxes
-            if width * 0.04 <= box.left <= width * 0.45
+            # Narrow Flutter canvases can start around 3% from the screenshot
+            # edge. Keep that first text column; otherwise the first numeric
+            # value becomes the false left anchor and the back click misses.
+            if width * 0.01 <= box.left <= width * 0.45
             and height * 0.08 <= box.top <= height * 0.92
         ]
         if not anchors:
@@ -1776,10 +1884,33 @@ class CanvasBot:
             path.parent.mkdir(parents=True, exist_ok=True)
             image.save(path)
 
+    async def capture_tick_error(self, browser: BrowserSession, error: Exception) -> None:
+        """Save a rate-limited visual error scene and non-sensitive browser context."""
+        _unknown_after_scans, cooldown_sec = self.diagnostics_cfg()
+        now = time.time()
+        if now - self.last_tick_error_capture_at < cooldown_sec:
+            return
+        self.last_tick_error_capture_at = now
+        try:
+            rect = await browser.app_rect()
+            image = await browser.screenshot_app(rect)
+            boxes = self.vision.read_text(image)
+            await self.maybe_save_debug(image, boxes, "tick_error", force=True)
+            diagnostics = await browser.diagnostics()
+            title = str(diagnostics.get("title", ""))[:120]
+            url = str(diagnostics.get("url", ""))[:240]
+            print(f"[diagnostic] 已保存异常现场：{type(error).__name__}; title={title!r}; url={url!r}")
+        except Exception as capture_error:
+            print(f"[diagnostic] 无法保存异常现场：{capture_error}")
+
     async def scan_app(self, browser: BrowserSession) -> tuple[Rect, Image.Image, list[TextBox]]:
         rect = await browser.app_rect()
+        screenshot_started = time.perf_counter()
         image = await browser.screenshot_app(rect)
+        screenshot_sec = time.perf_counter() - screenshot_started
+        ocr_started = time.perf_counter()
         boxes = self.vision.read_text(image)
+        self.runtime_monitor.record_scan(screenshot_sec, time.perf_counter() - ocr_started)
         return rect, image, boxes
 
     async def handle_incoming_order(
@@ -2996,7 +3127,13 @@ class CanvasBot:
             return True
         return await self.fill_and_submit_canvas_order_form(browser, rect)
 
-    async def handle_withdraw_unavailable_page(self, browser: BrowserSession, rect: Rect) -> bool:
+    async def handle_withdraw_unavailable_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
         """Leave the empty withdraw page so the bot can keep observing the move page."""
         now = time.time()
         last_back = getattr(self, "last_withdraw_unavailable_back_at", 0.0)
@@ -3008,8 +3145,8 @@ class CanvasBot:
         self.form_values = {}
         self.payment_selected_for_form = False
         self.record_action("变现余额不足10，返回搬砖页等待余额恢复")
-        back = self.points.get("order_detail_back", [0.08, 0.04])
-        await browser.click_relative(rect, float(back[0]), float(back[1]))
+        back = self.resolve_top_left_back_point(image, boxes)
+        await browser.click_relative(rect, *back)
         self.last_withdraw_unavailable_back_at = now
         self.next_post_after = now + 1.5
         self.move_page_opened = True
@@ -3057,6 +3194,10 @@ class CanvasBot:
         """Recover from a stuck canvas/loading state without touching risky confirmations."""
         self.unknown_page_streak = getattr(self, "unknown_page_streak", 0) + 1
         consecutive_scans, cooldown_sec = self.unknown_page_refresh_cfg()
+        capture_after_scans, _error_cooldown_sec = self.diagnostics_cfg()
+        if self.unknown_page_streak == capture_after_scans:
+            await self.maybe_save_debug(image, boxes, "unknown_page", force=True)
+            print(f"[diagnostic] 未知页面持续 {capture_after_scans} 次扫描，已保存现场截图。")
         if self.unknown_page_streak < consecutive_scans:
             print(f"[state] 未识别当前页面，等待刷新阈值 {self.unknown_page_streak}/{consecutive_scans}。")
             return True
@@ -3098,8 +3239,12 @@ class CanvasBot:
 
     async def tick(self, browser: BrowserSession) -> None:
         rect = await browser.app_rect()
+        screenshot_started = time.perf_counter()
         image = await browser.screenshot_app(rect)
+        screenshot_sec = time.perf_counter() - screenshot_started
+        ocr_started = time.perf_counter()
         boxes = self.vision.read_text(image)
+        self.runtime_monitor.record_scan(screenshot_sec, time.perf_counter() - ocr_started)
 
         if self.cfg.get("debug", {}).get("save_each_tick"):
             await self.maybe_save_debug(image, boxes, "tick")
@@ -3141,8 +3286,21 @@ class CanvasBot:
     async def run(self) -> None:
         async with BrowserSession(self.cfg) as browser:
             print(f"[boot] OCR: {self.vision.ocr_name}")
+            unknown_scans, unknown_cooldown = self.unknown_page_refresh_cfg()
+            diagnostic_unknown_scans, diagnostic_error_cooldown = self.diagnostics_cfg()
+            profile_mode = str(self.cfg.get("browser_profile", {}).get("mode", "managed")).lower()
+            print(
+                "[boot] "
+                f"profile={profile_mode} speed={self.cfg.get('speed_mode', 'safe')} "
+                f"poll={float(self.cfg.get('poll_interval_sec', 0.8)):.2f}s "
+                f"action_floor={float(self.cfg.get('action_throttle_sec', 0.7)):.2f}s "
+                f"unknown_reload={unknown_scans} scans/{unknown_cooldown:.0f}s "
+                f"diagnostic_unknown={diagnostic_unknown_scans} scans "
+                f"diagnostic_error_cooldown={diagnostic_error_cooldown:.0f}s"
+            )
             print("[boot] Browser ready. Press Ctrl+C to stop.")
             while True:
+                tick_started = time.perf_counter()
                 try:
                     await self.tick(browser)
                 except Exception as exc:
@@ -3150,6 +3308,8 @@ class CanvasBot:
                         print("[error] 浏览器页面已关闭，脚本停止。")
                         break
                     print(f"[error] tick failed: {exc}")
+                    await self.capture_tick_error(browser, exc)
+                await self.runtime_monitor.report_if_due(time.perf_counter() - tick_started)
                 await asyncio.sleep(float(self.cfg.get("poll_interval_sec", 0.8)))
 
 

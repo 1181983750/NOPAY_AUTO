@@ -15,7 +15,7 @@ async def handle_auth_page(bot: Any, _context: PageContext) -> bool:
 
 
 async def handle_withdraw_unavailable_page(bot: Any, context: PageContext) -> bool:
-    return await bot.handle_withdraw_unavailable_page(context.browser, context.rect)
+    return await bot.handle_withdraw_unavailable_page(context.browser, context.rect, context.image, context.boxes)
 
 
 async def handle_withdraw_form_page(bot: Any, context: PageContext) -> bool:
