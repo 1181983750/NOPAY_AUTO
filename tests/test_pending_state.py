@@ -37,6 +37,40 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertEqual(browser.page.keyboard.inserted, ["1500"])
 
+    def test_vision_reuses_only_identical_canvas_frames(self) -> None:
+        calls: list[object] = []
+
+        def fake_ocr(_image):
+            calls.append(object())
+            return [([[1, 2], [8, 2], [8, 10], [1, 10]], "测试", 0.99)], None
+
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.ocr = fake_ocr
+        vision.reuse_identical_frames = True
+        vision._last_frame_key = None
+        vision._last_frame_boxes = []
+        vision.last_read_used_cache = False
+        image = Image.new("RGB", (40, 40), "white")
+
+        self.assertEqual(len(vision.read_text(image)), 1)
+        self.assertEqual(len(vision.read_text(image.copy())), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(vision.last_read_used_cache)
+        changed = image.copy()
+        changed.putpixel((0, 0), (0, 0, 0))
+        self.assertEqual(len(vision.read_text(changed)), 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_vision_region_ocr_restores_canvas_coordinates(self) -> None:
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.read_text = lambda _image: [TextBox("卡片", 0.99, 10, 20, 50, 40)]
+        image = Image.new("RGB", (500, 900), "white")
+
+        boxes = vision.read_text_region(image, (0.0, 0.40, 1.0, 0.95))
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual((boxes[0].left, boxes[0].top, boxes[0].right, boxes[0].bottom), (10, 380, 50, 400))
+
     def test_multi_order_plans_remaining_balance_and_rotates_card_keywords(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {

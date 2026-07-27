@@ -270,8 +270,17 @@ class DashboardState:
             self.clear_previous_run_artifacts()
             self.process_log = self.log_path.open("w", encoding="utf-8", buffering=1)
             self.process_log.write(f"[dashboard] started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            # PyInstaller exposes the application as one executable, so passing
+            # ``-m canvas_bot`` back to it makes ``canvas_bot`` look like an
+            # invalid CLI command.  Editable/source runs still use the module
+            # form to retain unbuffered output and normal package resolution.
+            command = (
+                [sys.executable, "run", "--config", str(self.config_path)]
+                if getattr(sys, "frozen", False)
+                else [sys.executable, "-u", "-m", "canvas_bot", "run", "--config", str(self.config_path)]
+            )
             self.process = subprocess.Popen(
-                [sys.executable, "-u", "-m", "canvas_bot", "run", "--config", str(self.config_path)],
+                command,
                 cwd=self.project_root,
                 stdout=self.process_log,
                 stderr=subprocess.STDOUT,

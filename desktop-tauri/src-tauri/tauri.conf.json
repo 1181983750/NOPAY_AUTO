@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NO 钱包自动化",
+  "version": "0.1.0",
+  "identifier": "com.nopay.canvasbot",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NO 钱包自动化",
+        "width": 1180,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 680,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../../dist/NO钱包自动化": "nopay-python"
+    }
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -155,6 +156,11 @@ class VisionEngine:
         self.ocr = None
         self.ocr_name = "disabled"
         self.cv2 = None
+        vision_cfg = cfg.get("vision", {})
+        self.reuse_identical_frames = bool(vision_cfg.get("reuse_identical_frames", True))
+        self._last_frame_key: bytes | None = None
+        self._last_frame_boxes: list[TextBox] = []
+        self.last_read_used_cache = False
         self._init_cv2()
         self._init_ocr()
 
@@ -180,7 +186,19 @@ class VisionEngine:
         if not self.ocr:
             return []
 
-        arr = np.array(image.convert("RGB"))
+        rgb_image = image.convert("RGB")
+        frame_key: bytes | None = None
+        if self.reuse_identical_frames:
+            # This is an exact pixel fingerprint, not a fuzzy visual heuristic.
+            # A changed canvas always runs OCR again, while idle order pages avoid
+            # repeatedly spending seconds on the same frame.
+            frame_key = hashlib.blake2b(rgb_image.tobytes(), digest_size=16).digest()
+            if frame_key == self._last_frame_key:
+                self.last_read_used_cache = True
+                return list(self._last_frame_boxes)
+
+        self.last_read_used_cache = False
+        arr = np.array(rgb_image)
         try:
             result, _ = self.ocr(arr)
         except Exception as exc:
@@ -205,7 +223,35 @@ class VisionEngine:
                 )
             except Exception:
                 continue
+        if frame_key is not None:
+            self._last_frame_key = frame_key
+            self._last_frame_boxes = list(boxes)
         return boxes
+
+    def read_text_region(
+        self,
+        image: Image.Image,
+        bounds: tuple[float, float, float, float],
+    ) -> list[TextBox]:
+        """OCR a normalized canvas region and restore every result to canvas coordinates."""
+        width, height = image.size
+        left_ratio, top_ratio, right_ratio, bottom_ratio = bounds
+        left = int(clamp(width * left_ratio, 0, width - 1))
+        top = int(clamp(height * top_ratio, 0, height - 1))
+        right = int(clamp(width * right_ratio, left + 1, width))
+        bottom = int(clamp(height * bottom_ratio, top + 1, height))
+        region_boxes = self.read_text(image.crop((left, top, right, bottom)))
+        return [
+            TextBox(
+                text=box.text,
+                confidence=box.confidence,
+                left=box.left + left,
+                top=box.top + top,
+                right=box.right + left,
+                bottom=box.bottom + top,
+            )
+            for box in region_boxes
+        ]
 
     def find_text(
         self,
@@ -1903,13 +1949,17 @@ class CanvasBot:
         except Exception as capture_error:
             print(f"[diagnostic] 无法保存异常现场：{capture_error}")
 
-    async def scan_app(self, browser: BrowserSession) -> tuple[Rect, Image.Image, list[TextBox]]:
+    async def scan_app(
+        self,
+        browser: BrowserSession,
+        ocr_region: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Rect, Image.Image, list[TextBox]]:
         rect = await browser.app_rect()
         screenshot_started = time.perf_counter()
         image = await browser.screenshot_app(rect)
         screenshot_sec = time.perf_counter() - screenshot_started
         ocr_started = time.perf_counter()
-        boxes = self.vision.read_text(image)
+        boxes = self.vision.read_text_region(image, ocr_region) if ocr_region else self.vision.read_text(image)
         self.runtime_monitor.record_scan(screenshot_sec, time.perf_counter() - ocr_started)
         return rect, image, boxes
 
@@ -2479,6 +2529,9 @@ class CanvasBot:
             await asyncio.sleep(0.30)
 
         for attempt in range(attempts):
+            # 收款卡会因表单内容、校验提示和页面滚动出现在任意高度；不能假定它
+            # 总在下半区，否则会漏掉当前可见的目标卡并持续向下滚动。
+            # 静态画面仍由 VisionEngine 的逐像素缓存复用 OCR 结果。
             rect, image, boxes = await self.scan_app(browser)
             target = self.find_payment_card_target(image, boxes, keyword)
             if target:

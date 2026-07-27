@@ -4,3 +4,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 debug-screenshots/
+run-local.cmd
+build/
+dist/
+dashboard.log
+dashboard-error.log
+desktop-dashboard.log
+configs/tmp*.json
+desktop-tauri/node_modules/
+desktop-tauri/src-tauri/target/
+desktop-tauri/src-tauri/gen/

@@ -1,275 +1,112 @@
-# QJD67 Canvas Browser Bot
+# NO 钱包 Canvas 自动化
 
-这个版本不再依赖页面 DOM 文字。它用 Python + Playwright 控制 Chrome，对 Flutter/canvas 区域截图，再通过 OCR、模板图或比例坐标决定点击哪里。
+面向 Flutter/canvas 页面的一套本地浏览器自动化工具。脚本通过 Playwright 控制独立 Chrome、截取应用区域并以 OCR/模板识别页面状态，再执行已限定的挂单、接单、订单跟踪和超时重挂动作。
 
-完整文档：
+涉及“确认到账”“放行”等资金安全确认的操作被明确拦截，不会自动点击。
+
+## 快速开始
+
+环境要求：Windows、Python 3.10–3.12、[uv](https://docs.astral.sh/uv/)、Google Chrome。
+
+```powershell
+uv sync --extra ocr --link-mode=copy
+uv run qjd67-canvas-bot doctor --config configs/qjd67.json
+uv run qjd67-canvas-bot dashboard --config configs/qjd67.json
+```
+
+打开 <http://127.0.0.1:8765>，首次运行时在自动化浏览器中手动登录，再从本地控制台启动脚本。
+
+## 项目结构
+
+```text
+nopay/
+├── canvas_bot/                 # 自动化主包
+│   ├── __main__.py             # CLI、浏览器会话、OCR、状态机与诊断监控
+│   ├── dashboard.py            # 仅绑定本机的控制台与进程管理
+│   ├── core/                   # 数据模型、页面上下文、文本与路径工具
+│   ├── dialogs/                # 高优先级模态框路由
+│   ├── pages/                  # 普通页面路由
+│   ├── workflows/              # 跨页面订单流程
+│   └── services/               # PushPlus、Telegram 等外部服务
+├── configs/
+│   └── qjd67.json              # 当前运行配置（请勿提交密码）
+├── docs/                       # 使用、模块和状态机详细文档
+├── tests/                      # 单元测试
+├── debug-screenshots/          # 当前一轮的日志与调试截图（Git 忽略）
+├── pyproject.toml              # Python 依赖与 CLI 入口
+└── uv.lock                     # 锁定依赖版本
+```
+
+`.browser-profile/` 是独立 Chrome 登录状态，`.venv/` 是 uv 创建的虚拟环境；两者均为本机运行数据，不应提交。
+
+## 常用命令
+
+| 目标 | 命令 |
+|---|---|
+| 检查依赖与配置 | `uv run qjd67-canvas-bot doctor --config configs/qjd67.json` |
+| 手动登录并保存 Cookie | `uv run qjd67-canvas-bot login --config configs/qjd67.json` |
+| 截图并输出 OCR 结果 | `uv run qjd67-canvas-bot snapshot --config configs/qjd67.json` |
+| 直接运行自动化 | `uv run qjd67-canvas-bot run --config configs/qjd67.json` |
+| 启动本地控制台 | `uv run qjd67-canvas-bot dashboard --config configs/qjd67.json` |
+| 运行测试 | `uv run python -m unittest discover -s tests -v` |
+
+优先使用本地控制台启动和停止脚本。它只管理自身创建的自动化进程，不会自动取消平台上已经存在的订单。
+
+## 配置要点
+
+主配置是 [`configs/qjd67.json`](configs/qjd67.json)。常用项如下：
+
+| 配置区 | 用途 |
+|---|---|
+| `browser_profile` / `user_data_dir` | 默认使用独立 managed Chrome Profile，避免占用日常 Chrome |
+| `amount`、`limit_min`、`limit_max` | 挂单金额与单笔限额 |
+| `payment.keywords` | 收款方式的 OCR 匹配关键词，按顺序轮换 |
+| `auto_make_order`、`auto_repost`、`auto_accept` | 自动挂单、重挂、接单开关 |
+| `multi_order` | 多挂单、启动后接管已有订单、取消扫描边界 |
+| `speed_mode` | `safe` 或 `fast`；只调整可逆的页面/表单等待 |
+| `debug` | 操作截图与 OCR 标注保存策略 |
+| `performance_monitor` | 每 60 秒记录耗时、OCR 与 Python/Chrome 内存 |
+| `diagnostics` | 未知页面与异常现场截图的保存阈值和限频 |
+
+支付密码不要写入 JSON。推荐在本地控制台中临时输入（只保存在该控制台内存），或设置当前会话环境变量：
+
+```powershell
+$env:QJD67_PAY_PASSWORD = "六位数字密码"
+```
+
+保存控制台配置后，需要停止并重新启动脚本才会加载新参数。
+
+## 排障入口
+
+每次由控制台启动都会清理上一轮调试截图，并在 `debug-screenshots/` 留下本轮材料：
+
+| 文件或日志标记 | 用途 |
+|---|---|
+| `dashboard-bot.log` | 本轮完整运行日志 |
+| `*_unknown_page.png` | 未知页面连续达到诊断阈值时的现场 |
+| `*_tick_error.png` | 运行异常时的现场，默认每 30 秒至多一张 |
+| `[perf]` | 单轮、截图、OCR 耗时，以及 Python/独立 Chrome 内存 |
+| `[boot]` | 本轮速度、刷新和诊断阈值摘要 |
+
+示例性能日志：
+
+```text
+[perf] tick=2.31s screenshot=0.04s ocr=1.65s python_rss=382MB managed_chrome_rss=534MB
+```
+
+如果 `ocr` 或 `tick` 持续升高，先检查窗口尺寸、页面内容和调试截图；如果 Python 或 `managed_chrome_rss` 持续单向增长，再将同一轮的性能日志与异常截图一并保留以便排查。截图和日志可能包含订单或收款信息，分享前务必脱敏。
+
+## 详细文档
 
 - [使用与启动说明](docs/使用与启动说明.md)
 - [功能模块说明](docs/功能模块说明.md)
 - [页面状态机与操作边界](docs/页面状态机.md)
-
-## 安装
-
-```powershell
-uv sync
-```
-
-如果要识别 canvas 里的中文文字，安装 OCR 依赖：
-
-```powershell
-uv sync --extra ocr
-```
-
-第一次运行如果 Playwright 找不到浏览器，可以安装浏览器，或者继续使用配置里的本机 Chrome：
-
-```powershell
-uv run playwright install chromium
-```
-
-## 配置
-
-编辑 `configs/qjd67.json`：
-
-- `amount`：变现金额，必须填写。
-- `limit_min` / `limit_max`：单笔限额，可留空。
-- `payment.keyword`：OCR 找收款方式时用的关键词。
-- `payment.card_index`：保留给旧配置兼容；当前安全模式不会按卡片序号盲点。
-- 支付密码不要写进配置，推荐放环境变量：
-
-```powershell
-$env:QJD67_PAY_PASSWORD="你的支付密码"
-```
-
-## 运行
-
-先做环境检查：
-
-```powershell
-uv run qjd67-canvas-bot doctor --config configs/qjd67.json
-```
-
-第一次先手动登录。浏览器打开后登录，确认进入首页，再回到终端按 Enter：
-
-```powershell
-uv run qjd67-canvas-bot login --config configs/qjd67.json
-```
-
-打开浏览器并截一张 canvas 调试图：
-
-```powershell
-uv run qjd67-canvas-bot snapshot --config configs/qjd67.json
-```
-
-确认坐标和截图没问题后启动：
-
-```powershell
-uv run qjd67-canvas-bot run --config configs/qjd67.json
-```
-
-## 本地控制台
-
-启动本机网页控制台：
-
-```powershell
-uv run qjd67-canvas-bot dashboard --config configs/qjd67.json
-```
-
-浏览器打开 `http://127.0.0.1:8765` 后可调整金额、最小/最大限额、超时重挂、轮询和确认等待参数，也能启动或停止由控制台创建的脚本、查看日志和调试截图。保存参数后需要在控制台停止并重新启动脚本才会生效。
-
-控制台只监听本机地址。支付密码可在控制台中输入，但只保留在当前控制台内存；脚本仅在识别到支付密码弹窗时，通过随机令牌保护的本机接口读取最新值。因此脚本运行中也可先设置或更新密码，不会写入 JSON、日志、Git 或子进程环境变量。关闭控制台后需要重新输入。也可继续使用 `QJD67_PAY_PASSWORD` 环境变量。
-
-默认配置会使用 `.browser-profile/qjd67` 作为独立调试窗口。第一次需要手动登录，之后 cookie 会保留：
-
-```json
-"browser_profile": {
-  "mode": "managed"
-}
-```
-
-这个模式不会占用你平时正在用的 Chrome，也不用关闭已有 Chrome 窗口。
-
-默认 `viewport` 为 `null`，调试浏览器会使用 Chrome 的原生窗口尺寸，让目标网站保持与手动打开时相同的响应式布局。脚本仍会每轮识别 Flutter 内容区的位置。若要固定窗口以便复现 OCR 调试，可改回：
-
-```json
-"viewport": { "width": 1280, "height": 900 }
-```
-
-脚本打开后会先通过 OCR 点击顶部“搬砖”标签，再识别“开始搬砖”按钮；不会在默认的“买卖”页直接开始挂单。
-
-多挂单参数可在配置中设置：
-
-```json
-"multi_order": {
-  "enabled": true,
-  "cancel_search_max_steps": 40,
-  "cancel_search_step_px": 120,
-  "payment_keywords": ["魔仙", "另一张卡"]
-}
-```
-
-## 页面功能与操作流程
-
-脚本每一轮都会执行：`截图 → OCR/模板识别 → 先处理模态框 → 再处理普通页面 → 校验动作结果`。
-模态框优先级高于页面。出现模态框时，脚本不会同时执行底层页面的点击；模态框处理完成后，下一轮再回到原页面。
-
-### 普通页面
-
-| 页面 | 作用 | 脚本操作 | 结束条件 |
-|---|---|---|---|
-| 登录/注册页 | 等待账号登录 | 不自动输入账号、验证码或执行注册；等待你手动登录 | 识别到已登录首页后继续 |
-| 导航页/首页 | 登录后的入口页 | 点击顶部“搬砖”进入自动挂单页面 | 识别到搬砖页 |
-| 搬砖页 | 查看余额、开始挂单、查看已有挂单 | 读取“搬砖余额”；余额达到最小限额时点击“开始搬砖”；余额不足时不新增挂单，但继续跟踪已有挂单 | 进入变现表单、订单页或等待余额恢复 |
-| 变现表单 | 填写一笔挂单参数 | 填写变现金额、最小/最大限额，选择收款卡，点击底部确认按钮 | 进入二次确认、支付密码弹窗并最终返回搬砖页 |
-| 变现余额不足页 | 平台余额低于可变现最低值时的空页面 | 不尝试填写不存在的输入框；点击左上角返回搬砖页 | 回到搬砖页等待余额恢复 |
-| 订单列表页 | 查看进行中订单 | 识别待接单订单、活动挂单和订单状态；必要时刷新或进入订单详情 | 识别到订单详情、待付款状态或无进行中订单 |
-| 空订单页 | 订单页没有进行中订单 | 返回搬砖页继续余额检查和挂单流程 | 回到搬砖页 |
-| 搬砖详情/订单详情页 | 查看单笔挂单或订单状态 | 非待付款详情页点击左上角返回；不点击“取消变现”；页面加载不完整时等待识别 | 返回订单列表或搬砖页 |
-| 待付款页/待付款详情 | 订单已经进入等待买家付款 | 记录状态并发送一次待付款通知；不自动确认到账或放行 | 订单状态变化或回到订单页 |
-| 未知/加载页 | 页面暂时无法分类 | 只截图并等待；连续达到 `unknown_page_refresh.consecutive_scans` 后才刷新，刷新期间不点击 | 页面被识别，或刷新冷却结束 |
-
-### 模态框
-
-| 模态框 | 脚本操作 | 安全限制 |
-|---|---|---|
-| 交易通知/新订单弹窗 | 识别安全的“同意交易/同意接单”按钮并点击 | 自动接单，不推送通知 |
-| 订单异常提醒 | 按文字关闭提醒，等待后续页面状态 | 不推送通知，不根据异常提示猜测资金操作 |
-| 取消确认弹窗 | 仅在已确认目标是超时活动挂单后点击“确认取消” | 不会因为看见任意“取消”文字就点击；目标不确定时暂停并保存截图 |
-| 二次确认弹窗 | 识别并点击“确认变现/确定变现”等提交确认 | 二次确认未识别到时暂停本次挂单，不按坐标猜测 |
-| 支付密码弹窗 | 从控制台内存或环境变量读取密码并输入；默认输入六位后自动提交 | 密码不写入配置、日志、Git 或子进程环境变量；未设置密码时等待手动输入 |
-| 危险资金确认弹窗 | 保持等待并记录日志 | 含“确认到账”“确认放行”等危险资金词的按钮不会自动点击 |
-
-### 自动挂单流程
-
-```text
-登录完成
-  ↓
-导航页 → 点击“搬砖”
-  ↓
-搬砖页读取余额
-  ├─ 余额 < 最小限额：不新增，继续跟踪已有挂单
-  └─ 余额 ≥ 最小限额：点击“开始搬砖”
-        ↓
-变现表单填写金额和单笔限额
-        ↓
-选择配置关键词匹配的收款卡
-        ↓
-点击“确认变现”
-        ↓
-识别二次确认 → 识别支付密码弹窗 → 输入密码
-        ↓
-确认返回搬砖页
-        ↓
-记录挂单并继续下一轮
-```
-
-金额填写有二次视觉校验。余额不足配置的变现金额时会点击“全部”并使用实际可用余额；金额或限额没有被 OCR 确认时，脚本会停止本次挂单，等待页面恢复或人工检查。
-
-### 接单与通知流程
-
-```text
-交易通知弹窗
-  ↓
-识别安全接单按钮并点击
-  ↓
-订单进入待付款
-  ↓
-PushPlus 微信通知：待付款
-  ↓
-等待买家付款；不自动确认到账/放行
-```
-
-当前仅在待付款时推送：`待付款`：订单已进入待付款状态，请留意买家转账。
-
-启动脚本本身不发送通知；同一个事件在当前运行周期内只推送一次。PushPlus Token 通过 `QJD67_PUSHPLUS_TOKEN` 提供，不要写入 README、JSON 或提交到 Git。
-
-### 多挂单、超时取消与重挂流程
-
-开启 `multi_order.enabled` 后，脚本会接管启动前已有挂单并从本次启动时间重新计时。每笔挂单按先进先出跟踪：
-
-1. 余额不足最小限额时停止新增，但不影响已有挂单计时。
-2. 最早挂单达到 `repost_delay_sec` 后，向下小步扫描活动订单区。
-3. 只有确认取消按钮对应的是最早活动挂单，且下方存在已完成/已取消历史订单，才点击取消。
-4. 识别取消确认弹窗后确认取消，等待余额恢复。
-5. 余额恢复后回到搬砖页，按当前余额补挂下一笔。
-
-找不到明确取消目标、页面加载失败或关键字段校验失败时，脚本会保留调试截图并暂停相关动作，不会猜测点击。
-
-每次成功挂单后，脚本按 `payment_keywords` 顺序循环选择收款卡。它会 OCR 读取顶部“搬砖余额”，单笔金额不超过当前余额；当余额低于配置的 `limit_min`（最小限额）时停止新增挂单。若余额不足配置的变现金额，脚本点击页面的“全部”填写精确余额。只会对本次运行期间创建并计时的挂单进行超时取消，旧挂单不会被盲目取消。
-
-超时取消会向下小步扫描活动订单区，只有在“取消”按钮下方识别到已完成或已取消的历史订单时，才确认它是最早的活动订单并取消。`cancel_search_step_px` 默认 `120`，向下与回滚使用同样步长，避免跨过历史边界；`cancel_search_max_steps` 默认 `40`，达到上限时脚本只保存调试图并暂停，不会猜测取消目标。
-
-如果以后想复用你平时 Chrome 里的登录状态，再把 `mode` 改成 `system`：
-
-```json
-"browser_profile": {
-  "mode": "system",
-  "system_user_data_dir": "%LOCALAPPDATA%\\Google\\Chrome\\User Data",
-  "profile_directory": "Default"
-}
-```
-
-`system` 模式运行前需要先关掉所有 Chrome 窗口。Chrome 的用户目录同时只能被一个浏览器进程占用。如果你的常用 Chrome 不是 `Default` profile，在地址栏打开 `chrome://version`，看“个人资料路径”最后一段，比如 `Profile 1`，然后把 `profile_directory` 改成对应值。
-
-取消挂单的二次确认节奏可以在 `cancel_flow` 调：
-
-```json
-"cancel_flow": {
-  "confirm_delay_sec": 1.2,
-  "max_confirm_clicks": 1
-}
-```
-
-如果页面加载慢，把 `confirm_delay_sec` 调大，比如 `1.8`。识别不到取消确认时脚本不会按坐标猜测，而是保留调试截图等待你检查。
-
-挂单页面会优先用 OCR 按文字选择收款卡片：
-
-```json
-"payment": {
-  "keyword": "魔仙",
-  "ocr_attempts": 8,
-  "fallback_to_card_index": false
-}
-```
-
-脚本会在金额和限额填好后由 Playwright 截图，在“收款方式（可多选）”表单区域先取消已选的默认卡，再匹配 `payment.keyword` 对应的收款卡片文字并点击。目标卡未完全露出时才会在卡片区域小幅下滚；找不到卡片则保存调试截图并暂停本次挂单，不会按 `card_index` 坐标兜底。
-
-确认变现现在分两步：
-
-```json
-"submit_flow": {
-  "secondary_confirm_delay_sec": 1.0,
-  "secondary_confirm_timeout_sec": 7.0,
-  "password_timeout_sec": 8.0,
-  "return_to_start_timeout_sec": 8.0
-}
-```
-
-先识别并点击最底部的“确认变现/确定变现”，再等待 OCR 或模板检测到底部二次确认，确认后等待检测到支付密码弹窗，最后输入支付密码。输完后会等待检测到“开始搬砖”页面，才认为挂单完成。任一状态未出现都会保存截图并暂停当前挂单，不会用坐标猜测点击。
-
-支付密码默认按六位自动提交处理，输完后不会再点击确认：
-
-```json
-"password": {
-  "post_input_wait_sec": 0.8,
-  "confirm_after_input": false
-}
-```
-
-如果某个页面版本输完密码后还需要点确认，再把 `confirm_after_input` 改成 `true`。
-
-## 模板识别
-
-OCR 不稳定时，可以把小截图放到 `templates/`：
-
-```text
-templates/
-  pending.png
-  accept.png
-  order_form.png
-```
-
-脚本会在每轮截图中尝试匹配这些模板。模板越小越清晰越好，比如只截按钮文字或状态标签。
+- [`canvas_bot` 包内模块边界](canvas_bot/README.md)
 
 ## 安全边界
 
-脚本内置了到账、放行等危险确认词拦截。它可以自动挂单、重挂、同意接单，但不会自动点击类似“确认到账/放行”的危险确认。
+- 不自动登录、注册或处理验证码。
+- 关键金额、限额、收款方式与页面状态需通过 OCR/模板回读确认。
+- 未识别页面只等待并按阈值刷新，不进行猜测性点击。
+- 不自动确认到账、放行或任何危险资金操作。
+- 支付密码、通知 Token、登录 Profile、日志与截图均不得提交到 Git。

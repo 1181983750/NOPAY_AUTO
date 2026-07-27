@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
 
-ROOT = Path(__file__).resolve().parents[2]
+# A frozen executable must keep its profile, configuration and debug files next
+# to the executable, not inside PyInstaller's temporary extraction directory.
+ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
 
 
 def resolve_path(value: str | Path, base: Path = ROOT) -> Path:
