@@ -953,17 +953,18 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
         self.assertEqual(bot.post_accept_order_check, "open")
 
-    def test_keyboard_password_entry_presses_each_digit(self) -> None:
+    def test_keyboard_password_entry_verifies_flutter_hidden_input(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
                 self.clicks: list[tuple[float, float]] = []
-                self.keys: list[str] = []
+                self.replacements: list[str] = []
 
             async def click_abs(self, x: float, y: float) -> None:
                 self.clicks.append((x, y))
 
-            async def press(self, key: str) -> None:
-                self.keys.append(key)
+            async def replace_numeric(self, value: str) -> bool:
+                self.replacements.append(value)
+                return True
 
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {"texts": {"password_dialog": ["验证支付密码"]}}
@@ -974,12 +975,38 @@ class PendingStateTests(unittest.TestCase):
         image = Image.new("RGB", (508, 900), "white")
         heading = TextBox("验证支付密码", 1.0, 201, 367, 337, 395)
 
-        asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading]))
+        self.assertTrue(asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading])))
 
         self.assertEqual(len(browser.clicks), 1)
         self.assertAlmostEqual(browser.clicks[0][0], 162.32, places=2)
         self.assertAlmostEqual(browser.clicks[0][1], 450.8, places=2)
-        self.assertEqual(browser.keys, ["1", "2", "3", "4", "5", "6"])
+        self.assertEqual(browser.replacements, ["123456"])
+
+    def test_keyboard_password_entry_retries_once_when_hidden_input_stays_empty(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.clicks: list[tuple[float, float]] = []
+                self.replacements: list[str] = []
+
+            async def click_abs(self, x: float, y: float) -> None:
+                self.clicks.append((x, y))
+
+            async def replace_numeric(self, value: str) -> bool:
+                self.replacements.append(value)
+                return False
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"texts": {"password_dialog": ["验证支付密码"]}}
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        browser = FakeBrowser()
+        image = Image.new("RGB", (508, 900), "white")
+        heading = TextBox("验证支付密码", 1.0, 201, 367, 337, 395)
+
+        self.assertFalse(asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading])))
+        self.assertEqual(len(browser.clicks), 2)
+        self.assertEqual(browser.replacements, ["123456", "123456"])
 
     def test_dashboard_password_is_used_when_config_has_no_password(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

@@ -2244,7 +2244,7 @@ class CanvasBot:
         print(f"[warn] 点击全部后未确认变现金额 {expected_amount}，停止本次挂单。")
         return False
 
-    async def type_password_with_keypad(self, browser: BrowserSession, rect: Rect, password: str) -> None:
+    async def type_password_with_keypad(self, browser: BrowserSession, rect: Rect, password: str) -> bool:
         keypad = self.points.get("keypad", {})
         for digit in str(password):
             if not digit.isdigit() or digit not in keypad:
@@ -2252,6 +2252,8 @@ class CanvasBot:
             rx, ry = keypad[digit]
             await browser.click_relative(rect, float(rx), float(ry))
             await asyncio.sleep(0.09)
+        await asyncio.sleep(0.12)
+        return await browser.active_text_input_value() == str(password)
 
     async def type_password_with_keyboard(
         self,
@@ -2261,21 +2263,26 @@ class CanvasBot:
         image: Image.Image,
         boxes: list[TextBox],
     ) -> bool:
-        """Use key events because Flutter's six-slot field ignores text insertion."""
+        """Fill and verify Flutter's hidden six-digit password input."""
         target = self.resolve_password_field_target(image, boxes)
         if not target:
             await self.save_action_debug(image, boxes, "password_field_not_found")
             print("[warn] 未识别支付密码输入格，不输入密码。")
             return False
         x, y = target
-        await browser.click_abs(rect.left + x, rect.top + y)
-        await asyncio.sleep(0.12)
-        for digit in str(password):
-            if not digit.isdigit():
-                continue
-            await browser.press(digit)
-            await asyncio.sleep(0.08)
-        return True
+        for attempt in range(2):
+            await browser.click_abs(rect.left + x, rect.top + y)
+            await asyncio.sleep(0.12)
+            # ``replace_numeric`` focuses the Flutter editing input, inserts the
+            # whole password and verifies its hidden DOM value.  Raw key presses
+            # can be accepted by Playwright while the six visible boxes remain
+            # empty, which previously caused a false “input completed” message.
+            if await browser.replace_numeric(str(password)):
+                return True
+            if attempt == 0:
+                print("[state] 支付密码未写入输入格，重新聚焦后重试。")
+        print("[warn] 未确认支付密码已写入输入格，不等待页面跳转。")
+        return False
 
     async def handle_runtime_password_dialog(
         self,
@@ -2305,8 +2312,7 @@ class CanvasBot:
         mode = password_cfg.get("input_mode", "keyboard")
         self.record_action("检测到运行中支付密码，输入支付密码")
         if mode == "keypad":
-            await self.type_password_with_keypad(browser, rect, password)
-            entered = True
+            entered = await self.type_password_with_keypad(browser, rect, password)
         else:
             entered = await self.type_password_with_keyboard(browser, rect, password, image, boxes)
         if not entered:
@@ -2407,16 +2413,17 @@ class CanvasBot:
             rect = password_scan[0]
             self.record_action("二次确认后输入支付密码")
             if mode == "keypad":
-                await self.type_password_with_keypad(browser, rect, password)
+                entered = await self.type_password_with_keypad(browser, rect, password)
             else:
-                if not await self.type_password_with_keyboard(
+                entered = await self.type_password_with_keyboard(
                     browser,
                     rect,
                     password,
                     password_scan[1],
                     password_scan[2],
-                ):
-                    return False
+                )
+            if not entered:
+                return False
             self.password_dialog_input_pending = True
             await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
             if password_cfg.get("confirm_after_input", False):
