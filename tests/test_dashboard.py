@@ -1,8 +1,10 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from canvas_bot.dashboard import DashboardState, public_config, validate_dashboard_settings, write_config
 from canvas_bot.services.telegram import TelegramNotifier
@@ -114,7 +116,34 @@ class DashboardConfigTests(unittest.TestCase):
             environment = state.process_environment()
             self.assertEqual(environment["QJD67_DASHBOARD_URL"], "http://127.0.0.1:8765")
             self.assertEqual(environment["QJD67_DASHBOARD_TOKEN"], "token")
+            self.assertEqual(environment["QJD67_DASHBOARD_LOG"], str(state.log_path))
+            self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
             self.assertNotIn("QJD67_PAY_PASSWORD", environment)
+
+    @patch("canvas_bot.dashboard.os.name", "nt")
+    @patch("canvas_bot.dashboard.subprocess.run")
+    def test_stop_kills_the_windows_process_tree(self, run: Mock) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "settings.json"
+            write_config(config_path, self.cfg)
+            state = DashboardState(config_path, Path(directory))
+            process = Mock()
+            process.pid = 4321
+            process.poll.return_value = None
+            state.process = process
+
+            ok, _message = state.stop()
+
+            self.assertTrue(ok)
+            run.assert_called_once_with(
+                ["taskkill", "/PID", "4321", "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            process.wait.assert_called_once_with(timeout=8)
 
     def test_telegram_requires_token_and_chat_id(self) -> None:
         self.assertFalse(TelegramNotifier(token="token-only", chat_id="").enabled)

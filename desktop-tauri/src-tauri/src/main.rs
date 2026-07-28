@@ -1,3 +1,7 @@
+// Release builds are a desktop GUI application.  Without this Windows opens a
+// console window for the Tauri host process every time the app is launched.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::{
     env,
     io::{Read, Write},

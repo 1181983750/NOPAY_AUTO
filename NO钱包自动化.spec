@@ -47,7 +47,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    # The Tauri host starts this executable with CREATE_NO_WINDOW.  Keep the
+    # console subsystem here so a dashboard-launched child can redirect its
+    # stdout/stderr into dashboard-bot.log instead of losing every print().
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

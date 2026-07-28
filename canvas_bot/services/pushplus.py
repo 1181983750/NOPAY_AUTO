@@ -24,16 +24,32 @@ class PushPlusNotifier:
             except (FileNotFoundError, OSError):
                 pass
 
+    def dashboard_token(self) -> str:
+        base_url = str(os.getenv("QJD67_DASHBOARD_URL") or "").rstrip("/")
+        dashboard_token = str(os.getenv("QJD67_DASHBOARD_TOKEN") or "")
+        if not base_url or not dashboard_token:
+            return ""
+        request = urllib.request.Request(f"{base_url}/api/internal/pushplus", headers={"X-Dashboard-Token": dashboard_token})
+        try:
+            with urllib.request.urlopen(request, timeout=1.2) as response:  # noqa: S310 - local token endpoint
+                return str(json.loads(response.read().decode("utf-8")).get("token") or "").strip()
+        except Exception:
+            return ""
+
+    def active_token(self) -> str:
+        return self.dashboard_token() or self.token
+
     @property
     def enabled(self) -> bool:
-        return bool(self.token)
+        return bool(self.active_token())
 
     def send(self, title: str, content: str) -> str:
-        if not self.enabled:
+        token = self.active_token()
+        if not token:
             return "disabled"
         payload = json.dumps(
             {
-                "token": self.token,
+                "token": token,
                 "title": title,
                 "content": content,
                 "template": "txt",

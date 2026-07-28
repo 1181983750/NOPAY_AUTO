@@ -34,6 +34,59 @@ from .services.telegram import TelegramNotifier
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 
 
+class DashboardLogWriter:
+    """UTF-8 writer that releases the log file between writes for Windows readers."""
+
+    encoding = "utf-8"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def write(self, value: str) -> int:
+        if not value:
+            return 0
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", buffering=1) as log_file:
+                log_file.write(value)
+        except OSError:
+            pass
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+def configure_log_output() -> None:
+    """Keep redirected dashboard logs readable on Windows, including frozen builds."""
+    dashboard_log = str(os.getenv("QJD67_DASHBOARD_LOG") or "").strip()
+    if dashboard_log:
+        try:
+            log_writer = DashboardLogWriter(Path(dashboard_log))
+            sys.stdout = log_writer
+            sys.stderr = log_writer
+            return
+        except OSError:
+            # Fall through to the regular streams if the dashboard log is not
+            # available (for example, a standalone CLI launch).
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True, write_through=True)
+        except (AttributeError, OSError, ValueError):
+            # Some GUI launchers deliberately provide no standard streams.
+            # The dashboard itself remains usable in that case.
+            continue
+
+
+configure_log_output()
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 

@@ -201,6 +201,7 @@ class DashboardState:
     process: subprocess.Popen[str] | None = None
     process_log: Any = None
     payment_password: str = ""
+    pushplus_token: str = ""
     server_url: str = ""
     dashboard_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -240,10 +241,19 @@ class DashboardState:
         self.payment_password = password
         return "支付密码已清除。" if not password else "支付密码已保存到当前控制台内存。"
 
+    def set_pushplus_token(self, value: Any) -> str:
+        token = str(value or "").strip()
+        if len(token) > 512:
+            raise ValueError("PushPlus Token 不能超过 512 个字符")
+        self.pushplus_token = token
+        return "PushPlus Token 已清除。" if not token else "PushPlus Token 已保存到当前控制台内存。"
+
     def current_public_config(self) -> dict[str, Any]:
         values = public_config(self.load_config())
         values["password_available"] = self.password_available()
         values["password_source"] = "dashboard" if self.payment_password else ("environment" if values["password_available"] else "none")
+        values["pushplus_available"] = bool(self.pushplus_token or os.getenv("QJD67_PUSHPLUS_TOKEN"))
+        values["pushplus_source"] = "dashboard" if self.pushplus_token else ("environment" if values["pushplus_available"] else "none")
         return values
 
     def clear_previous_run_artifacts(self) -> None:
@@ -270,6 +280,8 @@ class DashboardState:
             self.clear_previous_run_artifacts()
             self.process_log = self.log_path.open("w", encoding="utf-8", buffering=1)
             self.process_log.write(f"[dashboard] started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self.process_log.close()
+            self.process_log = None
             # PyInstaller exposes the application as one executable, so passing
             # ``-m canvas_bot`` back to it makes ``canvas_bot`` look like an
             # invalid CLI command.  Editable/source runs still use the module
@@ -279,13 +291,20 @@ class DashboardState:
                 if getattr(sys, "frozen", False)
                 else [sys.executable, "-u", "-m", "canvas_bot", "run", "--config", str(self.config_path)]
             )
+            process_options: dict[str, Any] = {}
+            if os.name == "nt":
+                # The packaged Python executable has a console subsystem so
+                # stdout can be redirected to the dashboard log.  Do not show
+                # that console window when it is launched by the GUI.
+                process_options["creationflags"] = subprocess.CREATE_NO_WINDOW
             self.process = subprocess.Popen(
                 command,
                 cwd=self.project_root,
-                stdout=self.process_log,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=self.process_environment(),
+                **process_options,
             )
             return True, "已清除上一轮调试截图和运行日志，自动脚本已启动。"
 
@@ -294,9 +313,11 @@ class DashboardState:
         # Windows uses the active console code page for redirected output unless forced.
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
+        environment["PYTHONUNBUFFERED"] = "1"
         environment.pop(self.password_env(), None)
         environment["QJD67_DASHBOARD_URL"] = self.server_url
         environment["QJD67_DASHBOARD_TOKEN"] = self.dashboard_token
+        environment["QJD67_DASHBOARD_LOG"] = str(self.log_path)
         return environment
 
     def stop(self) -> tuple[bool, str]:
@@ -304,16 +325,34 @@ class DashboardState:
             if not self.running():
                 return False, "没有可由本控制台停止的脚本。"
             assert self.process is not None
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=4)
-            if self.process_log:
-                self.process_log.write(f"[dashboard] stopped {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                self.process_log.close()
-                self.process_log = None
+            process = self.process
+            if os.name == "nt":
+                # The bot owns a Chromium process tree.  Killing only the
+                # Python parent can leave Chrome alive, which then keeps its
+                # profile locked and makes the next start slow or fail.
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=4)
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=4)
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8", buffering=1) as log_file:
+                log_file.write(f"[dashboard] stopped {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             return True, "自动脚本已停止。"
 
     def status(self) -> dict[str, Any]:
@@ -392,6 +431,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_json({"password": self.state.internal_password()})
             return
+        if path == "/api/internal/pushplus":
+            supplied = self.headers.get("X-Dashboard-Token") or ""
+            if not secrets.compare_digest(supplied, self.state.dashboard_token):
+                self.send_json({"error": "未授权"}, HTTPStatus.FORBIDDEN)
+                return
+            self.send_json({"token": self.state.pushplus_token})
+            return
         if path == "/":
             self.send_html(DASHBOARD_HTML)
             return
@@ -420,6 +466,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/password":
                 message = self.state.set_payment_password(self.read_json().get("password"))
                 self.send_json({"ok": True, "message": message, "password_available": self.state.password_available()})
+                return
+            if path == "/api/pushplus":
+                message = self.state.set_pushplus_token(self.read_json().get("token"))
+                self.send_json({"ok": True, "message": message, "pushplus_available": bool(self.state.pushplus_token)})
                 return
             if path == "/api/bot/start":
                 ok, message = self.state.start()
@@ -553,7 +603,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
     <section class="panel"><header><h2>运行状态</h2><span id="password-state" class="hint"></span></header><div class="runtime">
       <div class="runtime-grid"><div class="metric"><b>脚本状态</b><span id="run-state">未运行</span></div><div class="metric"><b>进程 PID</b><span id="pid">-</span></div><div class="metric"><b>配置载入</b><span id="config-state">等待中</span></div></div>
-      <div class="form-footer" style="justify-content:flex-start"><label style="width:min(250px,100%)">支付密码<input id="payment-password" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字"></label><button id="save-password" type="button">设置支付密码</button></div>
+      <div class="form-footer" style="justify-content:flex-start"><label style="width:min(250px,100%)">支付密码<input id="payment-password" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字"></label><button id="save-password" type="button">设置支付密码</button><label style="width:min(330px,100%)">PushPlus Token<input id="pushplus-token" type="password" autocomplete="off" placeholder="仅当前控制台有效"></label><button id="save-pushplus" type="button">设置 PushPlus</button></div>
       <pre id="log">等待日志...</pre>
     </div></section>
     <section class="panel screens"><header><h2>调试截图</h2><span class="hint">最新 12 张</span></header><div id="gallery" class="gallery"></div></section>
@@ -569,19 +619,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec'];
     const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
-    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}`; }
+    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
     function applySpeedProfile(mode) { const profile = speedProfiles[mode]; if (!profile) return; Object.entries(profile).forEach(([name, value]) => { const input = document.querySelector(`[name="${name}"]`); if (input) input.value = value; }); }
     async function loadConfig() { fill(await request('/api/config')); }
     function collect() { const data = {}; names.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).value); checks.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).checked); return data; }
     async function save(e) { e.preventDefault(); const message = $('#save-message'); message.className = 'status-text'; message.textContent = '保存中...'; try { const data = await request('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collect())}); message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
     async function savePassword() { const input = $('#payment-password'); const message = $('#save-message'); try { const data = await request('/api/password', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:input.value})}); input.value = ''; message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
+    async function savePushPlus() { const input = $('#pushplus-token'); const message = $('#save-message'); try { const data = await request('/api/pushplus', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token:input.value})}); input.value = ''; message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
     async function control(action) { try { const data = await request(`/api/bot/${action}`, {method:'POST'}); $('#save-message').className = data.ok ? 'status-text ok' : 'status-text error'; $('#save-message').textContent = data.message; refresh(); } catch (err) { $('#save-message').className='status-text error'; $('#save-message').textContent=err.message; } }
     let logInitialized = false;
     function logNearBottom(log) { return log.scrollHeight - log.scrollTop - log.clientHeight < 18; }
     function renderLog(value) { const log = $('#log'); const follow = !logInitialized || logNearBottom(log); log.textContent = value || '暂无本控制台启动的日志。'; logInitialized = true; if (follow) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }); }
     async function refresh() { try { const s = await request('/api/status'); $('#state').textContent = s.running ? '运行中' : '未运行'; $('#state').className = `state ${s.running ? 'on' : ''}`; $('#run-state').textContent = s.running ? '运行中' : '未运行'; $('#pid').textContent = s.pid || '-'; $('#config-state').textContent = s.running ? '重启后更新' : '已就绪'; renderLog(s.log); $('#start').disabled = s.running; $('#stop').disabled = !s.running; } catch (_) {} }
     async function shots() { const gallery = $('#gallery'); const list = await request('/api/screenshots'); gallery.replaceChildren(); list.forEach(item => { const wrap=document.createElement('div'); wrap.className='shot'; const button=document.createElement('button'); const image=document.createElement('img'); image.loading='lazy'; image.src=`/debug/${encodeURIComponent(item.name)}?t=${item.time}`; image.alt=item.name; button.append(image); button.onclick=()=>{ $('#preview img').src=image.src; $('#preview').showModal(); }; const label=document.createElement('small'); label.textContent=item.name; wrap.append(button,label); gallery.append(wrap); }); }
-    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#save-password').onclick=savePassword; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
+    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#save-password').onclick=savePassword; $('#save-pushplus').onclick=savePushPlus; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
     Promise.all([loadConfig(), refresh(), shots()]); setInterval(refresh, 1500); setInterval(shots, 7000);
   </script>
 </body></html>"""

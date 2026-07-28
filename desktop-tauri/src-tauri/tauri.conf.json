@@ -27,6 +27,11 @@
     "targets": ["nsis"],
     "resources": {
       "../../dist/NO钱包自动化": "nopay-python"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis-hooks.nsh"
+      }
     }
   }
 }

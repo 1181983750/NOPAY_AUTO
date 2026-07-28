@@ -24,40 +24,36 @@
     "min_width": 240,
     "background_threshold": 18
   },
-  "action_throttle_sec": 0.5,
+  "action_throttle_sec": 0.45,
   "cancel_flow": {
-    "confirm_delay_sec": 1.0,
-    "retry_interval_sec": 1.0,
+    "confirm_delay_sec": 0.2,
+    "retry_interval_sec": 0.2,
     "confirm_timeout_sec": 3.0,
     "max_confirm_clicks": 1
   },
   "submit_flow": {
-    "secondary_confirm_delay_sec": 1.0,
-    "secondary_confirm_timeout_sec": 7.0,
+    "secondary_confirm_delay_sec": 0.35,
+    "secondary_confirm_timeout_sec": 3.0,
     "password_delay_sec": 0.7,
-    "password_timeout_sec": 4.0,
+    "password_timeout_sec": 2.0,
     "return_to_start_timeout_sec": 8.0,
-    "state_poll_sec": 0.35
+    "state_poll_sec": 0.25
   },
-  "repost_delay_sec": 35.0,
+  "repost_delay_sec": 25.0,
   "auto_make_order": true,
   "auto_repost": true,
   "auto_accept": true,
-  "amount": "3000",
-  "limit_min": "1100",
-  "limit_max": "3000",
+  "amount": "2000",
+  "limit_min": "1500",
+  "limit_max": "2000",
   "payment": {
-    "keyword": "魔仙",
+    "keyword": "吕遇游戏",
     "keywords": [
-      "魔仙",
-      "句号",
-      "锥子",
-      "建材",
-      "余明宏2"
+      "吕遇游戏"
     ],
     "card_index": 2,
     "scrolls": 0,
-    "ocr_attempts": 5,
+    "ocr_attempts": 15,
     "fallback_to_card_index": false,
     "return_timeout_sec": 5.0
   },
@@ -67,11 +63,7 @@
     "cancel_search_max_steps": 40,
     "cancel_search_step_px": 120,
     "payment_keywords": [
-      "魔仙",
-      "句号",
-      "锥子",
-      "建材",
-      "余明宏2"
+      "吕遇游戏"
     ]
   },
   "password": {
@@ -340,5 +332,18 @@
     "save_each_tick": false,
     "save_on_action": true,
     "draw_ocr": true
+  },
+  "performance_monitor": {
+    "enabled": true,
+    "interval_sec": 60
+  },
+  "diagnostics": {
+    "capture_unknown_after_scans": 3,
+    "error_capture_cooldown_sec": 30
+  },
+  "speed_mode": "fast",
+  "form_input": {
+    "focus_wait_sec": 0.12,
+    "verify_wait_sec": 0.25
   }
 }
