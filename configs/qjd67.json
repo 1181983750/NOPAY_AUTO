@@ -17,6 +17,10 @@
     "cooldown_sec": 20
   },
   "startup_wait_sec": 3,
+  "startup_navigation": {
+    "attempts": 3,
+    "retry_interval_sec": 2
+  },
   "canvas_wait_sec": 15,
   "visual_app_rect": {
     "enabled": true,
@@ -36,7 +40,7 @@
     "secondary_confirm_timeout_sec": 3.0,
     "password_delay_sec": 0.7,
     "password_timeout_sec": 2.0,
-    "return_to_start_timeout_sec": 8.0,
+    "return_to_start_timeout_sec": 15.0,
     "state_poll_sec": 0.25
   },
   "repost_delay_sec": 25.0,
@@ -70,7 +74,7 @@
     "env": "QJD67_PAY_PASSWORD",
     "value": "",
     "input_mode": "keyboard",
-    "post_input_wait_sec": 0.8,
+    "post_input_wait_sec": 1.5,
     "confirm_after_input": false
   },
   "texts": {

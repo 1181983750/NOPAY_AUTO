@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .secret_store import load as load_remembered_secrets, save as save_remembered_secrets
+
 
 SPEED_PROFILES: dict[str, dict[str, float]] = {
     # The safe profile keeps the existing visual confirmation cadence.
@@ -206,6 +208,14 @@ class DashboardState:
     dashboard_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def __post_init__(self) -> None:
+        remembered = load_remembered_secrets()
+        self.payment_password = remembered.get("payment_password", "")
+        self.pushplus_token = remembered.get("pushplus_token", "")
+
+    def persist_secrets(self) -> None:
+        save_remembered_secrets({"payment_password": self.payment_password, "pushplus_token": self.pushplus_token})
+
     @property
     def log_path(self) -> Path:
         return self.debug_dir / "dashboard-bot.log"
@@ -239,14 +249,16 @@ class DashboardState:
         if password and (len(password) != 6 or not password.isdigit()):
             raise ValueError("支付密码必须是 6 位数字")
         self.payment_password = password
-        return "支付密码已清除。" if not password else "支付密码已保存到当前控制台内存。"
+        self.persist_secrets()
+        return "支付密码已清除。" if not password else "支付密码已加密保存到当前 Windows 用户。"
 
     def set_pushplus_token(self, value: Any) -> str:
         token = str(value or "").strip()
         if len(token) > 512:
             raise ValueError("PushPlus Token 不能超过 512 个字符")
         self.pushplus_token = token
-        return "PushPlus Token 已清除。" if not token else "PushPlus Token 已保存到当前控制台内存。"
+        self.persist_secrets()
+        return "PushPlus Token 已清除。" if not token else "PushPlus Token 已加密保存到当前 Windows 用户。"
 
     def current_public_config(self) -> dict[str, Any]:
         values = public_config(self.load_config())
@@ -254,6 +266,10 @@ class DashboardState:
         values["password_source"] = "dashboard" if self.payment_password else ("environment" if values["password_available"] else "none")
         values["pushplus_available"] = bool(self.pushplus_token or os.getenv("QJD67_PUSHPLUS_TOKEN"))
         values["pushplus_source"] = "dashboard" if self.pushplus_token else ("environment" if values["pushplus_available"] else "none")
+        # User explicitly opted into showing remembered credentials in this
+        # local-only dashboard so they can verify persisted values after restart.
+        values["payment_password_value"] = self.payment_password
+        values["pushplus_token_value"] = self.pushplus_token
         return values
 
     def clear_previous_run_artifacts(self) -> None:
@@ -603,7 +619,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
     <section class="panel"><header><h2>运行状态</h2><span id="password-state" class="hint"></span></header><div class="runtime">
       <div class="runtime-grid"><div class="metric"><b>脚本状态</b><span id="run-state">未运行</span></div><div class="metric"><b>进程 PID</b><span id="pid">-</span></div><div class="metric"><b>配置载入</b><span id="config-state">等待中</span></div></div>
-      <div class="form-footer" style="justify-content:flex-start"><label style="width:min(250px,100%)">支付密码<input id="payment-password" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字"></label><button id="save-password" type="button">设置支付密码</button><label style="width:min(330px,100%)">PushPlus Token<input id="pushplus-token" type="password" autocomplete="off" placeholder="仅当前控制台有效"></label><button id="save-pushplus" type="button">设置 PushPlus</button></div>
+      <div class="form-footer" style="justify-content:flex-start"><label style="width:min(250px,100%)">支付密码<input id="payment-password" type="text" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="6 位数字"></label><button id="save-password" type="button">设置支付密码</button><label style="width:min(330px,100%)">PushPlus Token<input id="pushplus-token" type="text" autocomplete="off" placeholder="已记住的 Token 会显示在此"></label><button id="save-pushplus" type="button">设置 PushPlus</button></div>
       <pre id="log">等待日志...</pre>
     </div></section>
     <section class="panel screens"><header><h2>调试截图</h2><span class="hint">最新 12 张</span></header><div id="gallery" class="gallery"></div></section>
@@ -619,7 +635,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec'];
     const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
-    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
+    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); $('#payment-password').value = c.payment_password_value || ''; $('#pushplus-token').value = c.pushplus_token_value || ''; const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
     function applySpeedProfile(mode) { const profile = speedProfiles[mode]; if (!profile) return; Object.entries(profile).forEach(([name, value]) => { const input = document.querySelector(`[name="${name}"]`); if (input) input.value = value; }); }
     async function loadConfig() { fill(await request('/api/config')); }
     function collect() { const data = {}; names.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).value); checks.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).checked); return data; }

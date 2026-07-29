@@ -80,10 +80,15 @@ class DashboardConfigTests(unittest.TestCase):
             write_config(path, self.cfg)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["amount"], "3000")
 
-    def test_dashboard_password_is_validated_in_memory(self) -> None:
+    @patch("canvas_bot.dashboard.save_remembered_secrets")
+    @patch("canvas_bot.dashboard.load_remembered_secrets", return_value={})
+    def test_dashboard_password_is_validated_and_persisted(
+        self, _load: Mock, save: Mock
+    ) -> None:
         state = DashboardState(Path("settings.json"), Path.cwd())
-        self.assertIn("内存", state.set_payment_password("123456"))
+        self.assertIn("加密保存", state.set_payment_password("123456"))
         self.assertEqual(state.payment_password, "123456")
+        save.assert_called_with({"payment_password": "123456", "pushplus_token": ""})
         with self.assertRaisesRegex(ValueError, "6 位数字"):
             state.set_payment_password("12345")
 

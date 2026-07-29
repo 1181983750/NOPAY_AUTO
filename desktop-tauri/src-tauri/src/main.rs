@@ -4,6 +4,8 @@
 
 use std::{
     env,
+    ffi::c_void,
+    fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
@@ -13,19 +15,55 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tauri::{Manager, RunEvent};
+use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, Manager, RunEvent, WindowEvent};
 use url::Url;
 
 struct Backend(Mutex<Option<Child>>);
 
-fn sidecar_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+#[cfg(windows)]
+unsafe extern "system" {
+    fn MessageBoxW(
+        window: *mut c_void,
+        text: *const u16,
+        caption: *const u16,
+        style: u32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn close_program_selected() -> bool {
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_ICONQUESTION: u32 = 0x0000_0020;
+    const IDYES: i32 = 6;
+    let text: Vec<u16> = "是否停止脚本并退出程序？\r\n\r\n是：停止脚本、OCR 和浏览器后退出\r\n否：最小化到系统托盘并继续运行\0"
+        .encode_utf16()
+        .collect();
+    let caption: Vec<u16> = "NO 钱包自动化\0".encode_utf16().collect();
+    // This is a native Windows dialog, so it remains available even while the
+    // dashboard page is loading or the webview JavaScript is unresponsive.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
+}
+
+#[cfg(not(windows))]
+fn close_program_selected() -> bool {
+    false
+}
+
+fn sidecar_dir(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
         Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dist/NO钱包自动化"))
     }
     #[cfg(not(debug_assertions))]
     {
-        app.path()
+        _app.path()
             .resource_dir()
             .map_err(|error| error.to_string())
             .map(|path| path.join("nopay-python"))
@@ -38,6 +76,31 @@ fn reserve_port() -> Result<u16, String> {
         .local_addr()
         .map(|address| address.port())
         .map_err(|error| error.to_string())
+}
+
+fn dashboard_config_path(app: &tauri::AppHandle, sidecar: &std::path::Path) -> Result<PathBuf, String> {
+    // Keep user-selected settings outside the installer resource directory.
+    // NSIS replaces bundled resources on upgrade, while this path survives
+    // reinstalls and is shared with the DPAPI-protected dashboard secrets.
+    let data_root = match env::var_os("LOCALAPPDATA") {
+        Some(path) => PathBuf::from(path).join("NO钱包自动化"),
+        None => app.path().app_local_data_dir().map_err(|error| error.to_string())?,
+    };
+    let saved_config = data_root.join("config").join("qjd67.json");
+    if saved_config.is_file() {
+        return Ok(saved_config);
+    }
+
+    let bundled_config = sidecar.join("configs").join("qjd67.json");
+    if !bundled_config.is_file() {
+        return Err(format!("找不到初始配置：{}", bundled_config.display()));
+    }
+    let parent = saved_config
+        .parent()
+        .ok_or_else(|| "无法创建配置目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    fs::copy(&bundled_config, &saved_config).map_err(|error| error.to_string())?;
+    Ok(saved_config)
 }
 
 fn post_json(port: u16, path: &str, body: &str) -> Result<(), String> {
@@ -62,7 +125,7 @@ fn start_backend(app: &tauri::AppHandle) -> Result<(Child, u16), String> {
     if !executable.is_file() {
         return Err(format!("找不到 Python sidecar：{}", executable.display()));
     }
-    let config = sidecar.join("configs").join("qjd67.json");
+    let config = dashboard_config_path(app, &sidecar)?;
     let port = reserve_port()?;
     let mut command = Command::new(executable);
     command
@@ -90,11 +153,29 @@ fn wait_for_dashboard(port: u16) -> Result<(), String> {
     Err("本地控制台启动超时".into())
 }
 
+#[cfg(windows)]
+fn terminate_process_tree(process_id: u32) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill")
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
 fn stop_backend(app: &tauri::AppHandle) {
     if let Ok(mut guard) = app.state::<Backend>().0.lock() {
-        if let Some(mut child) = guard.take() {
+        if let Some(child) = guard.take() {
+            #[cfg(windows)]
+            terminate_process_tree(child.id());
+            #[cfg(not(windows))]
+            let mut child = child;
+            #[cfg(not(windows))]
+            {
             let _ = child.kill();
             let _ = child.wait();
+            }
         }
     }
 }
@@ -104,6 +185,37 @@ fn main() {
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
             let app_handle = app.handle().clone();
+            let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().ok_or("缺少应用图标")?.clone())
+                .tooltip("NO 钱包自动化正在运行")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+            if let Some(window) = app.get_webview_window("main") {
+                let window_for_close = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if close_program_selected() {
+                            window_for_close.app_handle().exit(0);
+                        } else {
+                            let _ = window_for_close.hide();
+                        }
+                    }
+                });
+            }
             let (mut child, port) = start_backend(&app_handle).map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             if let Err(error) = wait_for_dashboard(port) {
                 let _ = child.kill();

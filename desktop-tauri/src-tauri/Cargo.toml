@@ -1,6 +1,6 @@
 [package]
 name = "nopay-desktop"
-version = "0.1.0"
+version = "0.1.5"
 description = "NO 钱包自动化桌面控制台"
 authors = ["NO Pay"]
 edition = "2021"
@@ -9,5 +9,5 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 url = "2"

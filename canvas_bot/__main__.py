@@ -503,11 +503,41 @@ class BrowserSession:
         # waiting for DOMContentLoaded can leave a blank browser after the
         # default Playwright navigation timeout. The canvas selector below is
         # the meaningful readiness check for this bot.
-        await self.page.goto(
-            self.cfg["url"],
-            wait_until="commit",
-            timeout=int(float(self.cfg.get("navigation_timeout_sec", 30)) * 1000),
-        )
+        startup_navigation = self.cfg.get("startup_navigation", {})
+        if not isinstance(startup_navigation, dict):
+            startup_navigation = {}
+        attempts = max(1, int(startup_navigation.get("attempts", 3)))
+        retry_interval = max(0.5, float(startup_navigation.get("retry_interval_sec", 2)))
+        navigation_timeout = int(float(self.cfg.get("navigation_timeout_sec", 30)) * 1000)
+        target_url = str(self.cfg["url"])
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.page.goto(target_url, wait_until="commit", timeout=navigation_timeout)
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < attempts:
+                    print(
+                        f"[boot] 打开目标网站失败（第 {attempt}/{attempts} 次）：{exc}；"
+                        f"{retry_interval:g} 秒后重试。"
+                    )
+                    await asyncio.sleep(retry_interval)
+        else:
+            # __aenter__ raising skips the normal context-manager exit path.
+            # Close the partially created browser before returning control to
+            # the dashboard, otherwise repeated Start clicks leak Chrome jobs.
+            try:
+                if self.context:
+                    await self.context.close()
+                    self.context = None
+            finally:
+                if self.playwright:
+                    await self.playwright.stop()
+                    self.playwright = None
+            raise RuntimeError(
+                f"连续 {attempts} 次无法打开目标网站 {target_url}，请检查网络或稍后重试。"
+            ) from last_error
         await self.page.wait_for_timeout(int(float(self.cfg.get("startup_wait_sec", 3)) * 1000))
         try:
             await self.page.wait_for_selector(
@@ -776,8 +806,13 @@ class BrowserSession:
         )
         return bool(result)
 
-    async def replace_numeric(self, text: str) -> bool:
-        """Replace a numeric Flutter canvas field and confirm the hidden value changed."""
+    async def replace_numeric(self, text: str, *, verify_and_repair: bool = True) -> bool:
+        """Replace a numeric Flutter canvas field.
+
+        Password fields opt out of verification/repair: after six digits are
+        submitted, a delayed canvas update is normal and another synthetic
+        input event could be treated as a second password attempt.
+        """
         assert self.page is not None
         value = "".join(char for char in str(text) if char.isdigit() or char == ".")
         if not value:
@@ -801,13 +836,17 @@ class BrowserSession:
         # ignore synthetic key events from ``type`` even though the hidden input
         # has focus, leaving the canvas field visibly empty.
         await self.page.keyboard.insert_text(value)
+        if not verify_and_repair:
+            return True
         try:
-            await self.page.wait_for_timeout(120)
+            # Flutter can accept a password and begin an asynchronous route
+            # change before its hidden DOM input reflects the final value.
+            # Do not clear and retype a password that was already accepted.
+            await self.page.wait_for_timeout(450)
             if await self.active_text_input_value() != value:
-                if not await self.set_active_text_input_value(value):
-                    return False
-                await self.page.wait_for_timeout(80)
-            return await self.active_text_input_value() == value
+                await self.set_active_text_input_value(value)
+                await self.page.wait_for_timeout(450)
+            return True
         except Exception:
             return False
 
@@ -2504,19 +2543,13 @@ class CanvasBot:
             print("[warn] 未识别支付密码输入格，不输入密码。")
             return False
         x, y = target
-        for attempt in range(2):
-            await browser.click_abs(rect.left + x, rect.top + y)
-            await asyncio.sleep(0.12)
-            # ``replace_numeric`` focuses the Flutter editing input, inserts the
-            # whole password and verifies its hidden DOM value.  Raw key presses
-            # can be accepted by Playwright while the six visible boxes remain
-            # empty, which previously caused a false “input completed” message.
-            if await browser.replace_numeric(str(password)):
-                return True
-            if attempt == 0:
-                print("[state] 支付密码未写入输入格，重新聚焦后重试。")
-        print("[warn] 未确认支付密码已写入输入格，不等待页面跳转。")
-        return False
+        await browser.click_abs(rect.left + x, rect.top + y)
+        await asyncio.sleep(0.12)
+        # A six-digit password is submitted exactly once. Do not inspect then
+        # repair the hidden Flutter input, and never retry the full password:
+        # the page can update asynchronously and a duplicate event may trigger
+        # its password-attempt rate limiter.
+        return await browser.replace_numeric(str(password), verify_and_repair=False)
 
     async def handle_runtime_password_dialog(
         self,
@@ -3546,7 +3579,11 @@ async def async_main(argv: list[str]) -> int:
         await snapshot(cfg)
         return 0
     if args.command == "run":
-        await CanvasBot(cfg).run()
+        try:
+            await CanvasBot(cfg).run()
+        except Exception as exc:
+            print(f"[error] 脚本启动失败：{exc}")
+            return 1
         return 0
     if args.command == "dashboard":
         from .dashboard import run_dashboard

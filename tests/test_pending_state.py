@@ -1048,7 +1048,7 @@ class PendingStateTests(unittest.TestCase):
             async def click_abs(self, x: float, y: float) -> None:
                 self.clicks.append((x, y))
 
-            async def replace_numeric(self, value: str) -> bool:
+            async def replace_numeric(self, value: str, *, verify_and_repair: bool = True) -> bool:
                 self.replacements.append(value)
                 return True
 
@@ -1068,7 +1068,7 @@ class PendingStateTests(unittest.TestCase):
         self.assertAlmostEqual(browser.clicks[0][1], 450.8, places=2)
         self.assertEqual(browser.replacements, ["123456"])
 
-    def test_keyboard_password_entry_retries_once_when_hidden_input_stays_empty(self) -> None:
+    def test_keyboard_password_entry_never_retries_a_full_password(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
                 self.clicks: list[tuple[float, float]] = []
@@ -1077,7 +1077,7 @@ class PendingStateTests(unittest.TestCase):
             async def click_abs(self, x: float, y: float) -> None:
                 self.clicks.append((x, y))
 
-            async def replace_numeric(self, value: str) -> bool:
+            async def replace_numeric(self, value: str, *, verify_and_repair: bool = True) -> bool:
                 self.replacements.append(value)
                 return False
 
@@ -1091,8 +1091,8 @@ class PendingStateTests(unittest.TestCase):
         heading = TextBox("验证支付密码", 1.0, 201, 367, 337, 395)
 
         self.assertFalse(asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading])))
-        self.assertEqual(len(browser.clicks), 2)
-        self.assertEqual(browser.replacements, ["123456", "123456"])
+        self.assertEqual(len(browser.clicks), 1)
+        self.assertEqual(browser.replacements, ["123456"])
 
     def test_dashboard_password_is_used_when_config_has_no_password(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
