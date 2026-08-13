@@ -28,3 +28,8 @@ include = ["canvas_bot*"]
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.0",
+]
