@@ -23,24 +23,52 @@ GPU 环境后续使用 `uv run` 时保留 `--no-sync`，避免 uv 按 RapidOCR �
 
 ```text
 nopay/
-├── canvas_bot/                 # 自动化主包
-│   ├── __main__.py             # CLI、浏览器会话、OCR、状态机与诊断监控
-│   ├── dashboard.py            # 仅绑定本机的控制台与进程管理
-│   ├── core/                   # 数据模型、页面上下文、文本与路径工具
-│   ├── dialogs/                # 高优先级模态框路由
-│   ├── pages/                  # 普通页面路由
-│   ├── workflows/              # 跨页面订单流程
-│   └── services/               # PushPlus、Telegram 等外部服务
-├── configs/
-│   └── qjd67.json              # 当前运行配置（请勿提交密码）
-├── docs/                       # 使用、模块和状态机详细文档
-├── tests/                      # 单元测试
-├── debug-screenshots/          # 当前一轮的日志与调试截图（Git 忽略）
-├── pyproject.toml              # Python 依赖与 CLI 入口
-└── uv.lock                     # 锁定依赖版本
+├── canvas_bot/                         # 自动化主包
+│   ├── __main__.py                     # CLI、OCR、状态机与诊断监控
+│   ├── dashboard.py                    # 本地控制台与进程管理
+│   ├── desktop.py / secret_store.py    # 桌面运行与敏感配置
+│   ├── core/                           # 数据模型、页面上下文、文本工具
+│   ├── dialogs/                        # 高优先级模态框路由
+│   ├── pages/                          # 普通页面路由
+│   ├── workflows/                      # 跨页面订单流程
+│   └── services/                       # PushPlus、Telegram 等外部服务
+├── configs/                            # 运行配置（请勿写入密码）
+│   └── qjd67.json
+├── docs/                               # 使用、模块和状态机文档
+├── tests/                              # 单元测试
+├── desktop-tauri/                      # Tauri Windows 桌面壳
+│   ├── frontend/index.html             # 桌面控制台页面
+│   └── src-tauri/                      # Rust 主程序、权限、图标和 NSIS 配置
+├── NO钱包自动化.spec                   # PyInstaller sidecar 打包规格
+├── package_entry.py                    # sidecar 入口
+├── pyproject.toml / uv.lock             # Python 依赖与锁定版本
+├── release/                            # 本机生成的安装包（Git 忽略）
+├── .browser-profile/                   # 独立 Chrome 登录状态（Git 忽略）
+├── .venv/                              # Python 虚拟环境（Git 忽略）
+├── desktop-tauri/node_modules/         # 前端依赖（Git 忽略）
+└── debug-screenshots/                  # 运行时日志和截图（Git 忽略）
 ```
 
-`.browser-profile/` 是独立 Chrome 登录状态，`.venv/` 是 uv 创建的虚拟环境；两者均为本机运行数据，不应提交。
+源码提交只包含代码、配置模板、文档、测试和依赖锁文件。以下目录是可重建的临时产物，打包完成后可以删除：
+
+```text
+build/                               # PyInstaller 构建缓存
+dist/                                # PyInstaller sidecar 输出
+desktop-tauri/src-tauri/target/      # Cargo/Tauri 构建缓存
+__pycache__/、*.egg-info/             # Python 缓存和元数据
+```
+
+`.browser-profile/` 保存登录状态，`.venv/` 和 `desktop-tauri/node_modules/` 保存本机开发依赖，均应保留但不要提交。`release/` 只保存最终安装器；如需重新打包，可以删除后重新生成。
+
+## Windows 打包
+
+PyInstaller sidecar 和 Tauri NSIS 安装器均为本机生成文件，不进入 Git。完成构建后，将最终单文件安装器放在 `release/`：
+
+```text
+release/NO 钱包自动化_0.1.6_x64-setup.exe
+```
+
+安装器会在安装过程中展开 Python、OCR、浏览器和 CUDA 运行资源；“单文件”指分发时只有一个安装器，并不代表安装目录只有一个文件。GPU OCR 运行时包含 CUDA/cuDNN 组件，安装包体积会明显大于 CPU 版本。
 
 ## 常用命令
 
