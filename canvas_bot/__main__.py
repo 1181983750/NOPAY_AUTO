@@ -454,7 +454,11 @@ class BrowserSession:
                 or "%LOCALAPPDATA%\\Google\\Chrome\\User Data"
             )
         else:
-            user_data_dir = resolve_path(self.cfg.get("user_data_dir", ".browser-profile/qjd67"))
+            # Desktop builds inject an external profile path. Keep the profile
+            # out of installer resources so cookies survive upgrades.
+            user_data_dir = resolve_path(
+                os.getenv("QJD67_USER_DATA_DIR") or self.cfg.get("user_data_dir", ".browser-profile/qjd67")
+            )
         user_data_dir.mkdir(parents=True, exist_ok=True)
 
         # ``null`` opts into Chrome's native window viewport. Keep a fixed
@@ -3528,6 +3532,10 @@ class CanvasBot:
             )
             print("[boot] Browser ready. Press Ctrl+C to stop.")
             while True:
+                stop_file = os.getenv("QJD67_STOP_FILE", "").strip()
+                if stop_file and Path(stop_file).is_file():
+                    print("[stop] 收到控制台停止请求，正在安全关闭浏览器。")
+                    return
                 tick_started = time.perf_counter()
                 try:
                     await self.tick(browser)

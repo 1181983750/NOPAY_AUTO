@@ -18,7 +18,12 @@ use std::{
 use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, Manager, RunEvent, WindowEvent};
 use url::Url;
 
-struct Backend(Mutex<Option<Child>>);
+struct BackendProcess {
+    child: Child,
+    port: u16,
+}
+
+struct Backend(Mutex<Option<BackendProcess>>);
 
 #[cfg(windows)]
 unsafe extern "system" {
@@ -78,14 +83,18 @@ fn reserve_port() -> Result<u16, String> {
         .map_err(|error| error.to_string())
 }
 
+fn user_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    match env::var_os("LOCALAPPDATA") {
+        Some(path) => Ok(PathBuf::from(path).join("NO钱包自动化")),
+        None => app.path().app_local_data_dir().map_err(|error| error.to_string()),
+    }
+}
+
 fn dashboard_config_path(app: &tauri::AppHandle, sidecar: &std::path::Path) -> Result<PathBuf, String> {
     // Keep user-selected settings outside the installer resource directory.
     // NSIS replaces bundled resources on upgrade, while this path survives
     // reinstalls and is shared with the DPAPI-protected dashboard secrets.
-    let data_root = match env::var_os("LOCALAPPDATA") {
-        Some(path) => PathBuf::from(path).join("NO钱包自动化"),
-        None => app.path().app_local_data_dir().map_err(|error| error.to_string())?,
-    };
+    let data_root = user_data_root(app)?;
     let saved_config = data_root.join("config").join("qjd67.json");
     if saved_config.is_file() {
         return Ok(saved_config);
@@ -101,6 +110,41 @@ fn dashboard_config_path(app: &tauri::AppHandle, sidecar: &std::path::Path) -> R
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     fs::copy(&bundled_config, &saved_config).map_err(|error| error.to_string())?;
     Ok(saved_config)
+}
+
+fn persistent_browser_profile_path(
+    app: &tauri::AppHandle,
+    sidecar: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let profile = user_data_root(app)?.join("browser-profile").join("qjd67");
+    if profile.is_dir() {
+        return Ok(profile);
+    }
+
+    let legacy_profile = sidecar.join(".browser-profile").join("qjd67");
+    let parent = profile.parent().ok_or_else(|| "无法创建浏览器目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    if legacy_profile.is_dir() {
+        // Retain the existing signed-in session when upgrading from versions
+        // that kept the managed Chrome profile inside installer resources.
+        #[cfg(windows)]
+        {
+            let result = Command::new("robocopy")
+                .arg(&legacy_profile)
+                .arg(&profile)
+                .args(["/E", "/COPY:DAT", "/R:1", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS"])
+                .output()
+                .map_err(|error| error.to_string())?;
+            if result.status.code().map_or(true, |code| code > 7) {
+                return Err(format!("迁移浏览器登录资料失败：{}", String::from_utf8_lossy(&result.stderr)));
+            }
+        }
+        #[cfg(not(windows))]
+        fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
+    } else {
+        fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
+    }
+    Ok(profile)
 }
 
 fn post_json(port: u16, path: &str, body: &str) -> Result<(), String> {
@@ -126,12 +170,14 @@ fn start_backend(app: &tauri::AppHandle) -> Result<(Child, u16), String> {
         return Err(format!("找不到 Python sidecar：{}", executable.display()));
     }
     let config = dashboard_config_path(app, &sidecar)?;
+    let browser_profile = persistent_browser_profile_path(app, &sidecar)?;
     let port = reserve_port()?;
     let mut command = Command::new(executable);
     command
         .args(["dashboard", "--config"])
         .arg(config)
         .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .env("QJD67_USER_DATA_DIR", browser_profile)
         .current_dir(&sidecar);
     #[cfg(windows)]
     {
@@ -166,11 +212,14 @@ fn terminate_process_tree(process_id: u32) {
 
 fn stop_backend(app: &tauri::AppHandle) {
     if let Ok(mut guard) = app.state::<Backend>().0.lock() {
-        if let Some(child) = guard.take() {
+        if let Some(backend) = guard.take() {
+            // Dashboard stop waits for CanvasBot to close Playwright/Chrome.
+            // Only the dashboard process itself is force-terminated afterward.
+            let _ = post_json(backend.port, "/api/bot/stop", "{}");
             #[cfg(windows)]
-            terminate_process_tree(child.id());
+            terminate_process_tree(backend.child.id());
             #[cfg(not(windows))]
-            let mut child = child;
+            let child = &mut backend.child;
             #[cfg(not(windows))]
             {
             let _ = child.kill();
@@ -231,7 +280,7 @@ fn main() {
             }
             post_json(port, "/api/bot/start", "{}")
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
-            *app_handle.state::<Backend>().0.lock().map_err(|_| "backend state lock failed")? = Some(child);
+            *app_handle.state::<Backend>().0.lock().map_err(|_| "backend state lock failed")? = Some(BackendProcess { child, port });
             let url = Url::parse(&format!("http://127.0.0.1:{port}")).map_err(|error| error.to_string())?;
             app_handle
                 .get_webview_window("main")

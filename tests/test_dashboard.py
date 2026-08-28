@@ -128,7 +128,7 @@ class DashboardConfigTests(unittest.TestCase):
 
     @patch("canvas_bot.dashboard.os.name", "nt")
     @patch("canvas_bot.dashboard.subprocess.run")
-    def test_stop_kills_the_windows_process_tree(self, run: Mock) -> None:
+    def test_stop_requests_graceful_browser_shutdown_before_force_kill(self, run: Mock) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "settings.json"
             write_config(config_path, self.cfg)
@@ -138,18 +138,13 @@ class DashboardConfigTests(unittest.TestCase):
             process.poll.return_value = None
             state.process = process
 
-            ok, _message = state.stop()
+            ok, message = state.stop()
 
             self.assertTrue(ok)
-            run.assert_called_once_with(
-                ["taskkill", "/PID", "4321", "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            self.assertIn("安全停止", message)
+            self.assertFalse(run.called)
             process.wait.assert_called_once_with(timeout=8)
+            self.assertFalse(state.stop_signal_path.exists())
 
     def test_telegram_requires_token_and_chat_id(self) -> None:
         self.assertFalse(TelegramNotifier(token="token-only", chat_id="").enabled)

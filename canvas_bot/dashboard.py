@@ -227,6 +227,10 @@ class DashboardState:
         return self.debug_dir / "dashboard-bot.log"
 
     @property
+    def stop_signal_path(self) -> Path:
+        return self.debug_dir / "dashboard-stop.request"
+
+    @property
     def debug_dir(self) -> Path:
         with self.config_path.open("r", encoding="utf-8") as config_file:
             cfg = json.load(config_file)
@@ -300,6 +304,7 @@ class DashboardState:
                 self.process_log.close()
                 self.process_log = None
             self.clear_previous_run_artifacts()
+            self.stop_signal_path.unlink(missing_ok=True)
             self.process_log = self.log_path.open("w", encoding="utf-8", buffering=1)
             self.process_log.write(f"[dashboard] started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             self.process_log.close()
@@ -340,6 +345,7 @@ class DashboardState:
         environment["QJD67_DASHBOARD_URL"] = self.server_url
         environment["QJD67_DASHBOARD_TOKEN"] = self.dashboard_token
         environment["QJD67_DASHBOARD_LOG"] = str(self.log_path)
+        environment["QJD67_STOP_FILE"] = str(self.stop_signal_path)
         return environment
 
     def stop(self) -> tuple[bool, str]:
@@ -348,6 +354,18 @@ class DashboardState:
                 return False, "没有可由本控制台停止的脚本。"
             assert self.process is not None
             process = self.process
+            self.stop_signal_path.parent.mkdir(parents=True, exist_ok=True)
+            self.stop_signal_path.write_text("stop\n", encoding="utf-8")
+            try:
+                # Let CanvasBot close its persistent Chromium profile first.
+                process.wait(timeout=8)
+                self.stop_signal_path.unlink(missing_ok=True)
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8", buffering=1) as log_file:
+                    log_file.write(f"[dashboard] stopped gracefully {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                return True, "自动脚本已安全停止。"
+            except subprocess.TimeoutExpired:
+                pass
             if os.name == "nt":
                 # The bot owns a Chromium process tree.  Killing only the
                 # Python parent can leave Chrome alive, which then keeps its
@@ -372,10 +390,11 @@ class DashboardState:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=4)
+            self.stop_signal_path.unlink(missing_ok=True)
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8", buffering=1) as log_file:
-                log_file.write(f"[dashboard] stopped {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            return True, "自动脚本已停止。"
+                log_file.write(f"[dashboard] force-stopped {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            return True, "自动脚本超时，已强制停止。"
 
     def status(self) -> dict[str, Any]:
         process = self.process
