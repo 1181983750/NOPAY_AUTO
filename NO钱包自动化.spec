@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
 
 datas = []
 binaries = []
@@ -10,6 +11,29 @@ tmp_ret = collect_all('rapidocr_onnxruntime')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('onnxruntime')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# The CUDA wheel also ships optional FFT, random-number, and BLAS libraries.
+# They are not used by ONNX Runtime's CUDA execution provider, and including
+# them makes the NSIS data block approach the 2 GiB limit on Windows.
+for package_name in ('nvidia.cu13', 'nvidia.cudnn'):
+    try:
+        tmp_ret = collect_all(package_name)
+    except ImportError:
+        continue
+    datas += tmp_ret[0]
+    if package_name == 'nvidia.cu13':
+        optional_cuda_dlls = {
+            'cufft64_12.dll',
+            'cufftw64_12.dll',
+            'curand64_10.dll',
+            'nvblas64_13.dll',
+        }
+        binaries += [
+            item for item in tmp_ret[1]
+            if Path(item[0]).name.lower() not in optional_cuda_dlls
+        ]
+    else:
+        binaries += tmp_ret[1]
+    hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cv2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PIL')
@@ -35,6 +59,23 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Some third-party PyInstaller hooks add the complete CUDA wheel again after
+# the explicit collection above. Filter the final TOCs as a last line of
+# defense so optional libraries cannot re-enter the sidecar.
+optional_cuda_names = {
+    'cufft64_12.dll',
+    'cufftw64_12.dll',
+    'curand64_10.dll',
+    'nvblas64_13.dll',
+}
+a.binaries = [
+    item for item in a.binaries
+    if Path(item[0]).name.lower() not in optional_cuda_names
+]
+a.datas = [
+    item for item in a.datas
+    if Path(item[0]).name.lower() not in optional_cuda_names
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

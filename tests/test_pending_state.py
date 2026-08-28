@@ -1,7 +1,9 @@
 import asyncio
+import sys
 import time
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
@@ -98,6 +100,45 @@ class PendingStateTests(unittest.TestCase):
         changed.putpixel((0, 0), (0, 0, 0))
         self.assertEqual(len(vision.read_text(changed)), 1)
         self.assertEqual(len(calls), 2)
+
+    def test_vision_initializes_all_ocr_models_with_cuda(self) -> None:
+        class FakeSession:
+            def get_providers(self) -> list[str]:
+                return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+        class FakeInfer:
+            def __init__(self) -> None:
+                self.session = FakeSession()
+
+        class FakeRapidOCR:
+            kwargs: dict[str, object] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                self.__class__.kwargs = kwargs
+                self.text_det = SimpleNamespace(infer=FakeInfer())
+                self.text_cls = SimpleNamespace(infer=FakeInfer())
+                self.text_rec = SimpleNamespace(session=FakeInfer())
+
+        fake_module = SimpleNamespace(RapidOCR=FakeRapidOCR)
+        with patch.dict(sys.modules, {"rapidocr_onnxruntime": fake_module}), patch(
+            "canvas_bot.__main__.prepare_cuda_runtime"
+        ) as prepare_cuda_runtime:
+            vision = VisionEngine({"vision": {"ocr_device": "cuda"}})
+
+        prepare_cuda_runtime.assert_called_once_with()
+        self.assertEqual(vision.ocr_device, "cuda")
+        self.assertEqual(vision.ocr_name, "rapidocr-onnxruntime/CUDAExecutionProvider")
+        self.assertEqual(
+            FakeRapidOCR.kwargs,
+            {
+                "det_use_cuda": True,
+                "cls_use_cuda": True,
+                "rec_use_cuda": True,
+                "det_use_dml": False,
+                "cls_use_dml": False,
+                "rec_use_dml": False,
+            },
+        )
 
     def test_vision_region_ocr_restores_canvas_coordinates(self) -> None:
         vision = VisionEngine.__new__(VisionEngine)

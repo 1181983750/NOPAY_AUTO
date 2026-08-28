@@ -30,6 +30,7 @@
     },
     "windows": {
       "nsis": {
+        "compression": "none",
         "installerHooks": "nsis-hooks.nsh"
       }
     }

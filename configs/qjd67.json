@@ -28,6 +28,10 @@
     "min_width": 240,
     "background_threshold": 18
   },
+  "vision": {
+    "ocr_device": "cuda",
+    "reuse_identical_frames": true
+  },
   "action_throttle_sec": 0.45,
   "cancel_flow": {
     "confirm_delay_sec": 0.2,

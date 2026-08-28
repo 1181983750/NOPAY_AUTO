@@ -9,10 +9,13 @@
 环境要求：Windows、Python 3.10–3.12、[uv](https://docs.astral.sh/uv/)、Google Chrome。
 
 ```powershell
-uv sync --extra ocr --link-mode=copy
-uv run qjd67-canvas-bot doctor --config configs/qjd67.json
-uv run qjd67-canvas-bot dashboard --config configs/qjd67.json
+# rapidocr-onnxruntime declares the CPU runtime; leave it out and install the GPU wheel.
+uv sync --extra ocr-gpu --link-mode=copy --no-install-package onnxruntime
+uv run --no-sync qjd67-canvas-bot doctor --config configs/qjd67.json
+uv run --no-sync qjd67-canvas-bot dashboard --config configs/qjd67.json
 ```
+
+GPU 环境后续使用 `uv run` 时保留 `--no-sync`，避免 uv 按 RapidOCR 的传递依赖重新装回 CPU 版 runtime。
 
 打开 <http://127.0.0.1:8765>，首次运行时在自动化浏览器中手动登录，再从本地控制台启动脚本。
 
@@ -43,12 +46,12 @@ nopay/
 
 | 目标 | 命令 |
 |---|---|
-| 检查依赖与配置 | `uv run qjd67-canvas-bot doctor --config configs/qjd67.json` |
-| 手动登录并保存 Cookie | `uv run qjd67-canvas-bot login --config configs/qjd67.json` |
-| 截图并输出 OCR 结果 | `uv run qjd67-canvas-bot snapshot --config configs/qjd67.json` |
-| 直接运行自动化 | `uv run qjd67-canvas-bot run --config configs/qjd67.json` |
-| 启动本地控制台 | `uv run qjd67-canvas-bot dashboard --config configs/qjd67.json` |
-| 运行测试 | `uv run python -m unittest discover -s tests -v` |
+| 检查依赖与配置 | `uv run --no-sync qjd67-canvas-bot doctor --config configs/qjd67.json` |
+| 手动登录并保存 Cookie | `uv run --no-sync qjd67-canvas-bot login --config configs/qjd67.json` |
+| 截图并输出 OCR 结果 | `uv run --no-sync qjd67-canvas-bot snapshot --config configs/qjd67.json` |
+| 直接运行自动化 | `uv run --no-sync qjd67-canvas-bot run --config configs/qjd67.json` |
+| 启动本地控制台 | `uv run --no-sync qjd67-canvas-bot dashboard --config configs/qjd67.json` |
+| 运行测试 | `uv run --no-sync python -m unittest discover -s tests -v` |
 
 优先使用本地控制台启动和停止脚本。它只管理自身创建的自动化进程，不会自动取消平台上已经存在的订单。
 
@@ -65,6 +68,7 @@ nopay/
 | `multi_order` | 多挂单、启动后接管已有订单、取消扫描边界 |
 | `speed_mode` | `safe` 或 `fast`；只调整可逆的页面/表单等待 |
 | `debug` | 操作截图与 OCR 标注保存策略 |
+| `vision.ocr_device` | OCR 推理设备，默认 `cuda`；也支持 `cpu` 和 `directml` |
 | `performance_monitor` | 每 60 秒记录耗时、OCR 与 Python/Chrome 内存 |
 | `diagnostics` | 未知页面与异常现场截图的保存阈值和限频 |
 

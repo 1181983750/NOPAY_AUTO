@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import site
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,35 @@ from .services.telegram import TelegramNotifier
 # See ``core.text.ROOT``: packaged builds use the directory containing the EXE
 # so editable config and browser state remain outside the temporary bundle.
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+_CUDA_DLL_HANDLES: list[object] = []
+
+
+def prepare_cuda_runtime() -> None:
+    """Make pip-installed NVIDIA DLLs visible to Windows' DLL loader."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+
+    nvidia_roots: set[Path] = {Path(sys.executable).resolve().parent / "nvidia"}
+    for site_packages in site.getsitepackages():
+        nvidia_roots.add(Path(site_packages) / "nvidia")
+
+    dll_directories: set[Path] = set()
+    for nvidia_root in nvidia_roots:
+        if not nvidia_root.is_dir():
+            continue
+        dll_directories.update(path.parent for path in nvidia_root.rglob("*.dll"))
+
+    known_directories = {str(path) for path in dll_directories}
+    current_path = os.environ.get("PATH", "").split(os.pathsep)
+    missing_path = [directory for directory in sorted(known_directories) if directory not in current_path]
+    if missing_path:
+        os.environ["PATH"] = os.pathsep.join([*missing_path, *current_path])
+
+    for directory in missing_path:
+        try:
+            _CUDA_DLL_HANDLES.append(os.add_dll_directory(directory))
+        except OSError:
+            continue
 
 
 class DashboardLogWriter:
@@ -209,6 +239,7 @@ class VisionEngine:
         self.templates_dir = resolve_path(cfg.get("templates_dir", "templates"))
         self.ocr = None
         self.ocr_name = "disabled"
+        self.ocr_device = "cpu"
         self.cv2 = None
         vision_cfg = cfg.get("vision", {})
         self.reuse_identical_frames = bool(vision_cfg.get("reuse_identical_frames", True))
@@ -227,14 +258,61 @@ class VisionEngine:
             self.cv2 = None
 
     def _init_ocr(self) -> None:
+        vision_cfg = self.cfg.get("vision", {})
+        requested_device = str(vision_cfg.get("ocr_device", "cuda")).strip().lower()
+        use_cuda = requested_device in {"cuda", "gpu", "nvidia"}
+        use_dml = requested_device in {"directml", "dml"}
         try:
+            if use_cuda:
+                prepare_cuda_runtime()
             from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
-            self.ocr = RapidOCR()
-            self.ocr_name = "rapidocr-onnxruntime"
-        except Exception:
+            self.ocr = RapidOCR(
+                det_use_cuda=use_cuda,
+                cls_use_cuda=use_cuda,
+                rec_use_cuda=use_cuda,
+                det_use_dml=use_dml,
+                cls_use_dml=use_dml,
+                rec_use_dml=use_dml,
+            )
+            providers = self._ocr_providers()
+            provider = providers[0] if providers else "unknown"
+            if provider == "CUDAExecutionProvider":
+                self.ocr_device = "cuda"
+            elif provider == "DmlExecutionProvider":
+                self.ocr_device = "directml"
+            else:
+                self.ocr_device = "cpu"
+            self.ocr_name = f"rapidocr-onnxruntime/{provider}"
+            if use_cuda and self.ocr_device != "cuda":
+                print(
+                    "[vision] CUDA OCR requested but CUDAExecutionProvider is unavailable; "
+                    f"using {provider}. Install onnxruntime-gpu and verify CUDA/cuDNN."
+                )
+        except Exception as exc:
             self.ocr = None
             self.ocr_name = "disabled"
+            print(f"[vision] OCR initialization failed: {exc}")
+
+    def _ocr_providers(self) -> list[str]:
+        """Return the execution providers used by RapidOCR's model sessions."""
+        if self.ocr is None:
+            return []
+
+        providers: list[str] = []
+        for component_name in ("text_det", "text_cls", "text_rec"):
+            component = getattr(self.ocr, component_name, None)
+            for wrapper_name in ("infer", "session"):
+                wrapper = getattr(component, wrapper_name, None)
+                session = getattr(wrapper, "session", wrapper)
+                get_providers = getattr(session, "get_providers", None)
+                if not callable(get_providers):
+                    continue
+                for provider in get_providers():
+                    if provider not in providers:
+                        providers.append(provider)
+                break
+        return providers
 
     def read_text(self, image: Image.Image) -> list[TextBox]:
         if not self.ocr:
@@ -3615,6 +3693,21 @@ def doctor(cfg: dict[str, Any]) -> int:
         check("rapidocr", True)
     except Exception:
         print("[optional] rapidocr missing; run: uv sync --extra ocr")
+
+    requested_ocr_device = str(cfg.get("vision", {}).get("ocr_device", "cuda")).strip().lower()
+    try:
+        if requested_ocr_device in {"cuda", "gpu", "nvidia"}:
+            prepare_cuda_runtime()
+        import onnxruntime as ort  # type: ignore
+
+        providers = ort.get_available_providers()
+        check("onnxruntime", True, ", ".join(providers))
+        if requested_ocr_device in {"cuda", "gpu", "nvidia"}:
+            check("ocr-cuda", "CUDAExecutionProvider" in providers, "CUDAExecutionProvider required")
+        elif requested_ocr_device in {"directml", "dml"}:
+            check("ocr-directml", "DmlExecutionProvider" in providers, "DmlExecutionProvider required")
+    except Exception as exc:
+        check("onnxruntime", False, str(exc))
 
     chrome_path = cfg.get("chrome_path")
     check("chrome", bool(chrome_path and Path(chrome_path).exists()), str(chrome_path or ""))
