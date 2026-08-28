@@ -2,6 +2,7 @@ import asyncio
 import time
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -9,6 +10,43 @@ from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, 
 
 
 class PendingStateTests(unittest.TestCase):
+    def test_pushplus_waiting_transfer_message_uses_name_template_and_time(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"notification": {"transfer_name": "张三"}}
+
+        with patch("canvas_bot.__main__.random.choice", return_value=("转账提醒", "订单已进入待付款状态，请留意买家转账。")), patch(
+            "canvas_bot.__main__.time.strftime", return_value="14:32:08"
+        ):
+            title, content = bot.pushplus_waiting_transfer_message()
+
+        self.assertEqual(title, "张三 转账提醒")
+        self.assertEqual(content, "张三：订单已进入待付款状态，请留意买家转账。\n通知时间：14:32:08")
+
+    def test_waiting_transfer_varies_only_the_pushplus_message(self) -> None:
+        class FakeNotifier:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.enabled = True
+                self.sent: list[tuple[str, str]] = []
+
+            def send(self, title: str, content: str) -> None:
+                self.sent.append((title, content))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        pushplus = FakeNotifier("PushPlus")
+        telegram = FakeNotifier("Telegram")
+        bot.cfg = {"notification": {"transfer_name": "张三"}}
+        bot.notified_events = set()
+        bot.notifiers = [pushplus, telegram]
+
+        with patch("canvas_bot.__main__.random.choice", return_value=("待付款提醒", "有一笔订单正在等待付款，请留意转账动态。")), patch(
+            "canvas_bot.__main__.time.strftime", return_value="14:32:08"
+        ):
+            asyncio.run(bot.notify_once("waiting_transfer", "待付款", "订单已进入待付款状态，请留意买家转账。"))
+
+        self.assertEqual(pushplus.sent, [("张三 待付款提醒", "张三：有一笔订单正在等待付款，请留意转账动态。\n通知时间：14:32:08")])
+        self.assertEqual(telegram.sent, [("待付款", "订单已进入待付款状态，请留意买家转账。")])
+
     def test_replace_numeric_uses_playwright_insert_text(self) -> None:
         class FakeKeyboard:
             def __init__(self) -> None:
@@ -548,7 +586,7 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(bot.form_submission_failed)
         self.assertEqual(bot.form_values, {})
 
-    def test_order_exception_reminder_clicks_ignore_not_view_details(self) -> None:
+    def test_order_exception_reminder_uses_global_ignore_route_not_view_details(self) -> None:
         class FakeBrowser:
             pass
 
@@ -584,9 +622,66 @@ class PendingStateTests(unittest.TestCase):
             TextBox("立即查看", 0.99, 300, 650, 440, 690),
         ]
 
-        self.assertEqual(bot.classify_visual_page(image, boxes), "order_exception_dialog")
-        self.assertTrue(asyncio.run(bot.handle_order_exception_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
+        self.assertEqual(bot.classify_visual_page(image, boxes), "system_ignore_dialog")
+        self.assertTrue(asyncio.run(bot.handle_system_ignore_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(clicked, ["忽略"])
+
+    def test_system_ignore_dialog_overrides_the_underlying_move_page(self) -> None:
+        class FakeBrowser:
+            pass
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "action_throttle_sec": 0.1,
+            "texts": {
+                "system_dialog": ["系统提示"],
+                "system_dialog_ignore": ["忽略"],
+            },
+        }
+        bot.last_action_at = 0.0
+        bot.last_system_ignore_at = 0.0
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda _image, _name: None
+        bot.vision = vision
+        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
+        clicked: list[str] = []
+
+        async def click_target(_browser, _rect, target) -> None:
+            clicked.append(target.text)
+
+        bot.click_visual_target = click_target
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [
+            TextBox("系统提示", 0.99, 185, 260, 320, 300),
+            TextBox("请留意系统公告", 0.99, 130, 345, 380, 380),
+            TextBox("忽略", 0.99, 125, 650, 220, 690),
+            TextBox("搬砖余额", 0.99, 35, 95, 180, 125),
+            TextBox("开始搬砖", 0.99, 365, 145, 485, 185),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "system_ignore_dialog")
+        self.assertTrue(asyncio.run(bot.handle_system_ignore_dialog(FakeBrowser(), Rect(0, 0, 506, 900), image, boxes)))
+        self.assertEqual(clicked, ["忽略"])
+
+    def test_ignore_text_without_a_system_modal_title_is_not_routed_as_a_dialog(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "texts": {
+                "system_dialog": ["系统提示"],
+                "system_dialog_ignore": ["忽略"],
+                "start": ["开始搬砖"],
+            },
+        }
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda _image, _name: None
+        bot.vision = vision
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [
+            TextBox("开始搬砖", 0.99, 365, 145, 485, 185),
+            TextBox("忽略", 0.99, 125, 650, 220, 690),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "move_page")
 
     def test_trade_success_dialog_closes_only_its_acknowledgement(self) -> None:
         class FakeBrowser:

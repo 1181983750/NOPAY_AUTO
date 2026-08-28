@@ -43,7 +43,7 @@ class DashboardConfigTests(unittest.TestCase):
 
     def test_updates_only_supported_settings(self) -> None:
         values = public_config(self.cfg)
-        values.update({"amount": "4000", "auto_accept": False, "payment_keyword": "收款人", "payment_keywords": "收款人\n备用卡", "password": "123456"})
+        values.update({"amount": "4000", "auto_accept": False, "payment_keyword": "收款人", "payment_keywords": "收款人\n备用卡", "pushplus_transfer_name": "张三", "password": "123456"})
         updated = validate_dashboard_settings(self.cfg, values)
         self.assertEqual(updated["amount"], "4000")
         self.assertFalse(updated["auto_accept"])
@@ -52,6 +52,7 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertFalse(updated["multi_order"]["adopt_existing_pending_orders"])
         self.assertNotIn("minimum_remaining_balance", updated["multi_order"])
         self.assertEqual(updated["password"]["value"], "")
+        self.assertEqual(updated["notification"]["transfer_name"], "张三")
 
     def test_fast_speed_profile_updates_only_reversible_timing(self) -> None:
         values = public_config(self.cfg)

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -23,7 +24,7 @@ from PIL import Image, ImageDraw
 from .core.context import PageContext
 from .core.models import Rect, TemplateMatch, TextBox
 from .core.text import clamp, normalize_text, resolve_path, split_terms, text_has_any
-from .dialogs.handlers import dispatch_modal
+from .dialogs.handlers import classify_modal_page, dispatch_modal, is_global_interrupt_modal
 from .pages.handlers import dispatch_page
 from .services.pushplus import PushPlusNotifier
 from .services.telegram import TelegramNotifier
@@ -875,6 +876,7 @@ class CanvasBot:
         self.last_waiting_transfer_back_at = 0.0
         self.last_post_accept_detail_back_at = 0.0
         self.last_exception_ignore_at = 0.0
+        self.last_system_ignore_at = 0.0
         self.last_system_notice_close_at = 0.0
         self.post_accept_order_check = ""
         self.post_accept_order_check_until = 0.0
@@ -926,7 +928,10 @@ class CanvasBot:
         for notifier in enabled_notifiers:
             name = str(getattr(notifier, "name", notifier.__class__.__name__))
             try:
-                await asyncio.to_thread(notifier.send, title, content)
+                send_title, send_content = title, content
+                if event == "waiting_transfer" and name == "PushPlus":
+                    send_title, send_content = self.pushplus_waiting_transfer_message()
+                await asyncio.to_thread(notifier.send, send_title, send_content)
                 print(f"[notify] {name} 已提交：{event}")
             except Exception as exc:
                 print(f"[notify] {name} 发送失败：{event} {exc}")
@@ -934,6 +939,23 @@ class CanvasBot:
     @property
     def texts(self) -> dict[str, list[str]]:
         return self.cfg.get("texts", {})
+
+    def pushplus_waiting_transfer_message(self) -> tuple[str, str]:
+        """Build a natural, timestamped waiting-transfer notification for PushPlus only."""
+        notification = self.cfg.get("notification", {})
+        transfer_name = str(notification.get("transfer_name") or "").strip()
+        name_prefix = f"{transfer_name}：" if transfer_name else ""
+        title_prefix = f"{transfer_name} " if transfer_name else ""
+        title, body = random.choice(
+            [
+                ("转账提醒", "订单已进入待付款状态，请留意买家转账。"),
+                ("待付款提醒", "有一笔订单正在等待付款，请留意转账动态。"),
+                ("订单付款提醒", "买家正在付款，请留意到账情况。"),
+                ("买家转账提醒", "订单等待买家转账，请及时查看付款状态。"),
+            ]
+        )
+        sent_at = time.strftime("%H:%M:%S")
+        return f"{title_prefix}{title}", f"{name_prefix}{body}\n通知时间：{sent_at}"
 
     @property
     def points(self) -> dict[str, Any]:
@@ -1354,6 +1376,37 @@ class CanvasBot:
             bounds=(width * 0.20, height * 0.16, width * 0.80, height * 0.52),
         )
 
+    def find_system_ignore_target(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
+        """Find Ignore only when it belongs to a recognized system modal.
+
+        System reminders can overlay every page.  The Ignore label alone is not
+        sufficient evidence because it may belong to ordinary page content, so
+        require a configured system-modal title in the same central sheet.
+        """
+        width, height = image.size
+        title_terms = list(self.texts.get("system_dialog", []))
+        title_terms.extend(self.texts.get("order_exception", []))
+        title_terms.extend(self.texts.get("system_notice", []))
+        title_terms = list(dict.fromkeys(title_terms))
+        if not title_terms:
+            title_terms = ["系统提示", "温馨提示", "安全提示", "安全通知", "订单异常提醒"]
+        title = self.vision.find_text(
+            boxes,
+            title_terms,
+            prefer_center=True,
+            max_text_length=24,
+            bounds=(width * 0.12, height * 0.10, width * 0.88, height * 0.68),
+        )
+        if not title:
+            return None
+        return self.vision.find_template(image, "system_dialog_ignore") or self.vision.find_text(
+            boxes,
+            self.texts.get("system_dialog_ignore", self.texts.get("order_exception_ignore", ["忽略"])),
+            prefer_bottom=True,
+            max_text_length=12,
+            bounds=(width * 0.08, height * 0.45, width * 0.54, height * 0.94),
+        )
+
     def find_submit_confirm_dialog(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | None:
         """Find the bottom-sheet confirmation shown after submitting a cash-out form."""
         width, height = image.size
@@ -1550,20 +1603,9 @@ class CanvasBot:
 
     def classify_visual_page(self, image: Image.Image, boxes: list[TextBox]) -> str:
         """Classify the visible Flutter page before deciding which actions are allowed."""
-        if self.find_system_notice_dialog(image, boxes):
-            return "system_notice_dialog"
-        if self.find_submit_confirm_dialog(image, boxes):
-            return "submit_confirm_dialog"
-        if self.find_trade_success_ack(image, boxes):
-            return "trade_success_dialog"
-        if self.find_trade_notification(image, boxes):
-            return "trade_notification"
-        if self.find_order_exception_dialog(image, boxes):
-            return "order_exception_dialog"
-        if self.find_password_dialog(image, boxes):
-            return "password_dialog"
-        if getattr(self, "cancel_confirm_until", 0) and self.find_cancel_confirm_target(image, boxes):
-            return "cancel_confirm_dialog"
+        modal_page = classify_modal_page(self, PageContext(None, None, image, boxes))
+        if modal_page:
+            return modal_page
         # A 订单 > 进行中 list can contain a row labelled 待付款. It is still a
         # list page (and must receive its periodic pull-to-refresh), not the
         # full-screen 出售详情 waiting page.
@@ -1678,13 +1720,10 @@ class CanvasBot:
             scan = await self.scan_app(browser)
             rect, image, boxes = scan
             last_scan = scan
-            if self.find_trade_notification(image, boxes):
-                print("[state] 提交等待期间检测到交易通知，优先处理来单。")
-                await self.handle_incoming_order(browser, rect, image, boxes)
-                return None
-            if self.find_order_exception_dialog(image, boxes):
-                print("[state] 提交等待期间检测到订单异常提醒，按忽略关闭。")
-                await self.handle_order_exception_dialog(browser, rect, image, boxes)
+            modal_page = await self.handle_global_interrupt_modal(browser, rect, image, boxes)
+            if modal_page:
+                if modal_page == "trade_notification":
+                    return None
                 await asyncio.sleep(max(0.15, cfg["state_poll_sec"]))
                 continue
             if state == "password" and self.find_password_dialog(image, boxes):
@@ -2191,6 +2230,27 @@ class CanvasBot:
         await self.save_action_debug(image, boxes, "order_exception_ignore")
         self.record_action("订单异常提醒，按文字点击忽略")
         self.last_exception_ignore_at = now
+        await self.click_visual_target(browser, rect, target)
+        return True
+
+    async def handle_system_ignore_dialog(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> bool:
+        """Dismiss a recognized system sheet through its explicit Ignore action."""
+        target = self.find_system_ignore_target(image, boxes)
+        if not target:
+            return True
+        now = time.time()
+        last_ignore = getattr(self, "last_system_ignore_at", 0.0)
+        if now - last_ignore < 0.8 or not self.can_act():
+            return True
+        await self.save_action_debug(image, boxes, "system_dialog_ignore")
+        self.record_action("系统提示，按文字点击忽略")
+        self.last_system_ignore_at = now
         await self.click_visual_target(browser, rect, target)
         return True
 
@@ -2760,6 +2820,17 @@ class CanvasBot:
             await asyncio.sleep(max(0.15, cfg["state_poll_sec"]))
             rect, image, boxes = await self.scan_app(browser)
             elapsed = time.time() - started
+
+            modal_page = await self.handle_global_interrupt_modal(browser, rect, image, boxes)
+            if modal_page:
+                # ``handle_incoming_order`` records the form interruption. Let
+                # the existing password-state wait observe that interruption and
+                # hand control back to the orders flow without clicking anything
+                # beneath the notification.
+                if modal_page == "trade_notification":
+                    return True
+                await asyncio.sleep(max(0.15, cfg["state_poll_sec"]))
+                continue
 
             if self.has_dangerous_confirm(boxes):
                 print("[guard] 检测到账/放行类确认，跳过二次确认。")
@@ -3364,6 +3435,24 @@ class CanvasBot:
     ) -> bool:
         """Delegate high-priority dialog handling to ``canvas_bot.dialogs``."""
         return await dispatch_modal(self, page, PageContext(browser, rect, image, boxes))
+
+    async def handle_global_interrupt_modal(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image,
+        boxes: list[TextBox],
+    ) -> str | None:
+        """Consume a system or trade modal before a synchronous workflow continues."""
+        page = classify_modal_page(self, PageContext(browser, rect, image, boxes))
+        if not is_global_interrupt_modal(page):
+            return None
+        if page == "trade_notification":
+            print("[state] 提交等待期间检测到交易通知，优先处理来单。")
+        else:
+            print("[state] 提交等待期间检测到系统提示，优先忽略或关闭。")
+        await self.handle_modal_page(page, browser, rect, image, boxes)
+        return page
 
     async def handle_content_page(
         self,

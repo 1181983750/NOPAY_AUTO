@@ -77,6 +77,9 @@
     "post_input_wait_sec": 1.5,
     "confirm_after_input": false
   },
+  "notification": {
+    "transfer_name": ""
+  },
   "texts": {
     "move_page_tab": [
       "搬砖"
@@ -185,6 +188,19 @@
       "订单异常提醒"
     ],
     "order_exception_ignore": [
+      "忽略"
+    ],
+    "system_dialog": [
+      "系统提示",
+      "温馨提示",
+      "安全提示",
+      "安全通知",
+      "系统通知",
+      "系统公告",
+      "订单异常提醒",
+      "提示"
+    ],
+    "system_dialog_ignore": [
       "忽略"
     ],
     "accept_confirm": [

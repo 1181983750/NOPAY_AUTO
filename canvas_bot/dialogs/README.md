@@ -6,6 +6,8 @@
 
 | 页面标识 | 委托动作 | 业务边界 |
 | --- | --- | --- |
+| `system_ignore_dialog` | 点击“忽略” | 系统标题与“忽略”必须同屏；优先于任意底层页面和表单等待 |
+| `system_notice_dialog` | 关闭安全通知 | 无“忽略”时仅关闭已识别通知的右上角关闭图标 |
 | `submit_confirm_dialog` | 点击变现二次确认的“确认” | 仅在本轮已提交变现表单的短时窗口内执行 |
 | `trade_success_dialog` | 点击“知道了”关闭成功提示 | 必须同时识别“交易成功”和“知道了”，不触碰到账或放行确认 |
 | `trade_notification` | `handle_incoming_order` | 仅在自动接单开关开启且收款方式匹配时同意 |

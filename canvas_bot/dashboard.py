@@ -83,6 +83,7 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
     debug = cfg.get("debug", {})
     password = cfg.get("password", {})
     multi_order = cfg.get("multi_order", {})
+    notification = cfg.get("notification", {})
     raw_keywords = multi_order.get("payment_keywords") or payment.get("keywords") or [payment.get("keyword", "")]
     if isinstance(raw_keywords, str):
         raw_keywords = raw_keywords.splitlines()
@@ -111,6 +112,7 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "debug_save_each_tick": bool(debug.get("save_each_tick", False)),
         "password_env": str(password.get("env") or "QJD67_PAY_PASSWORD"),
         "password_available": bool(os.getenv(str(password.get("env") or "QJD67_PAY_PASSWORD"))),
+        "pushplus_transfer_name": str(notification.get("transfer_name") or ""),
     }
 
 
@@ -132,6 +134,9 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
         raise ValueError("收款卡片关键词列表至少需要一项")
     if any(len(item) > 80 for item in raw_keywords):
         raise ValueError("收款方式关键词不能超过 80 个字符")
+    transfer_name = str(values.get("pushplus_transfer_name") or "").strip()
+    if len(transfer_name) > 40:
+        raise ValueError("PushPlus 转账名称不能超过 40 个字符")
 
     updated["amount"] = amount
     updated["limit_min"] = limit_min
@@ -179,6 +184,7 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
     form_input["focus_wait_sec"] = speed["form_focus_wait_sec"]
     form_input["verify_wait_sec"] = speed["form_verify_wait_sec"]
     updated.setdefault("debug", {})["save_each_tick"] = _flag(values.get("debug_save_each_tick"))
+    updated.setdefault("notification", {})["transfer_name"] = transfer_name
     return updated
 
 
@@ -614,6 +620,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label><input name="adopt_existing_pending_orders" type="checkbox"> <span class="field-label">启动后接管已有挂单 <span class="info" tabindex="0" aria-label="接管规则" title="从脚本启动时重新计时；超时后按最底部优先取消。">i</span></span></label>
           <label><input name="debug_save_each_tick" type="checkbox"> 每轮保存截图</label>
         </div></fieldset>
+        <fieldset><legend>通知文案</legend><div class="form-grid"><label>PushPlus 转账名称<input name="pushplus_transfer_name" type="text" maxlength="40" placeholder="例如：张三"></label></div></fieldset>
         <div class="form-footer"><span id="save-message" class="status-text"></span><button class="primary" type="submit">保存配置</button></div>
       </form>
     </section>
@@ -632,7 +639,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       safe: { poll_interval_sec: 0.8, action_throttle_sec: 0.7, submit_secondary_confirm_delay_sec: 0.5 },
       fast: { poll_interval_sec: 0.5, action_throttle_sec: 0.45, submit_secondary_confirm_delay_sec: 0.35 },
     };
-    const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec'];
+    const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec','pushplus_transfer_name'];
     const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
     function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); $('#payment-password').value = c.payment_password_value || ''; $('#pushplus-token').value = c.pushplus_token_value || ''; const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
