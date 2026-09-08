@@ -1,8 +1,10 @@
 import asyncio
 import sys
+import tempfile
 import time
 import unittest
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +25,32 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertEqual(title, "张三 转账提醒")
         self.assertEqual(content, "张三：订单已进入待付款状态，请留意买家转账。\n通知时间：14:32:08")
+
+    def test_payment_keywords_hot_reload_from_dashboard_config(self) -> None:
+        from canvas_bot.dashboard import write_config
+
+        with self.subTest("dashboard updates are read without rebuilding the bot"):
+            with tempfile.TemporaryDirectory() as directory:
+                config_path = Path(directory) / "settings.json"
+                cfg = {
+                    "payment": {
+                        "keyword_options": [
+                            {"keyword": "旧关键词", "enabled": True},
+                            {"keyword": "停用关键词", "enabled": False},
+                        ]
+                    },
+                    "multi_order": {"payment_keywords": ["旧关键词"]},
+                }
+                write_config(config_path, cfg)
+                bot = CanvasBot.__new__(CanvasBot)
+                bot.cfg = load_config(config_path)
+                bot.multi_payment_index = 0
+
+                self.assertEqual(bot.current_payment_keyword(), "旧关键词")
+
+                cfg["payment"]["keyword_options"] = [{"keyword": "新关键词", "enabled": True}]
+                write_config(config_path, cfg)
+                self.assertEqual(bot.current_payment_keyword(), "新关键词")
 
     def test_waiting_transfer_varies_only_the_pushplus_message(self) -> None:
         class FakeNotifier:

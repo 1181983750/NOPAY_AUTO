@@ -5,6 +5,7 @@
 - `context.py`：`PageContext`，封装一次 OCR 扫描对应的浏览器对象、画面、坐标和文本框。
 - `models.py`：`Rect`、`TextBox`、`TemplateMatch` 等数据模型。
 - `text.py`：路径解析、文本归一化、关键词拆分和基础数值工具。
+- `payment.py`：收款关键词选项的规范化、启用状态和热参数读取。
 
 ## 允许
 

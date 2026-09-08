@@ -91,7 +91,7 @@ release/NO 钱包自动化_0.1.6_x64-setup.exe
 |---|---|
 | `browser_profile` / `user_data_dir` | 默认使用独立 managed Chrome Profile，避免占用日常 Chrome |
 | `amount`、`limit_min`、`limit_max` | 挂单金额与单笔限额 |
-| `payment.keywords` | 收款方式的 OCR 匹配关键词，按顺序轮换 |
+| `payment.keyword_options` | 收款方式 OCR 关键词及启用状态；收款关键词是热参数，勾选保存后运行中的脚本会在下一次选卡前读取 |
 | `auto_make_order`、`auto_repost`、`auto_accept` | 自动挂单、重挂、接单开关 |
 | `multi_order` | 多挂单、启动后接管已有订单、取消扫描边界 |
 | `speed_mode` | `safe` 或 `fast`；只调整可逆的页面/表单等待 |
@@ -107,6 +107,8 @@ $env:QJD67_PAY_PASSWORD = "六位数字密码"
 ```
 
 保存控制台配置后，需要停止并重新启动脚本才会加载新参数。
+
+收款方式关键词例外：控制台中的关键词列表支持逐项勾选，保存后会热更新到正在运行的脚本；金额、限额、自动操作开关和等待时间等其他参数仍需停止并重新启动脚本。
 
 ## 排障入口
 

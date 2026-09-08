@@ -54,6 +54,28 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertEqual(updated["password"]["value"], "")
         self.assertEqual(updated["notification"]["transfer_name"], "张三")
 
+    def test_payment_keyword_options_keep_disabled_entries_and_active_order(self) -> None:
+        values = public_config(self.cfg)
+        values.pop("payment_keywords", None)
+        values["payment_keyword_options"] = [
+            {"keyword": "魔仙", "enabled": True},
+            {"keyword": "备用卡", "enabled": False},
+        ]
+
+        updated = validate_dashboard_settings(self.cfg, values)
+
+        self.assertEqual(updated["payment"]["keyword_options"], values["payment_keyword_options"])
+        self.assertEqual(updated["payment"]["keywords"], ["魔仙"])
+        self.assertEqual(updated["multi_order"]["payment_keywords"], ["魔仙"])
+
+    def test_rejects_when_all_payment_keywords_are_disabled(self) -> None:
+        values = public_config(self.cfg)
+        values.pop("payment_keywords", None)
+        values["payment_keyword_options"] = [{"keyword": "魔仙", "enabled": False}]
+
+        with self.assertRaisesRegex(ValueError, "启用一项"):
+            validate_dashboard_settings(self.cfg, values)
+
     def test_fast_speed_profile_updates_only_reversible_timing(self) -> None:
         values = public_config(self.cfg)
         values["speed_mode"] = "fast"

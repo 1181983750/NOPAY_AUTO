@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw
 
 from .core.context import PageContext
 from .core.models import Rect, TemplateMatch, TextBox
+from .core.payment import enabled_payment_keywords, normalize_payment_keyword_options
 from .core.text import clamp, normalize_text, resolve_path, split_terms, text_has_any
 from .dialogs.handlers import classify_modal_page, dispatch_modal, is_global_interrupt_modal
 from .pages.handlers import dispatch_page
@@ -994,6 +995,7 @@ class CanvasBot:
         self.last_password_input_at = 0.0
         self.password_dialog_input_pending = False
         self._state_log_times: dict[str, float] = {}
+        self._payment_config_mtime_ns: int | None = None
 
     async def notify_once(self, event: str, title: str, content: str) -> None:
         """Send one notification per event per run; notification failures never stop the bot."""
@@ -1190,15 +1192,52 @@ class CanvasBot:
             error_cooldown_sec = 30.0
         return max(2, min(unknown_after_scans, 10)), max(10.0, error_cooldown_sec)
 
+    def _refresh_hot_payment_settings(self) -> None:
+        """Reload only payment keyword options changed by the local dashboard."""
+        config_path = str(self.cfg.get("_config_path") or "").strip()
+        if not config_path:
+            return
+        path = Path(config_path)
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return
+        previous_mtime_ns = getattr(self, "_payment_config_mtime_ns", None)
+        if previous_mtime_ns is None:
+            self._payment_config_mtime_ns = mtime_ns
+            return
+        if mtime_ns == previous_mtime_ns:
+            return
+        try:
+            with path.open("r", encoding="utf-8") as config_file:
+                fresh_cfg = json.load(config_file)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(fresh_cfg, dict):
+            return
+        payment = fresh_cfg.get("payment", {})
+        multi_order = fresh_cfg.get("multi_order", {})
+        options = normalize_payment_keyword_options(
+            payment.get("keyword_options"),
+            multi_order.get("payment_keywords") or payment.get("keywords") or payment.get("keyword", ""),
+        )
+        if not enabled_payment_keywords(options):
+            return
+        self.cfg["payment"] = payment
+        self.cfg.setdefault("multi_order", {})["payment_keywords"] = enabled_payment_keywords(options)
+        self._payment_config_mtime_ns = mtime_ns
+        self.multi_payment_index = 0
+        print(f"[hot] 收款关键词已更新：{', '.join(enabled_payment_keywords(options))}")
+
     def payment_keywords(self) -> list[str]:
+        self._refresh_hot_payment_settings()
         multi_keywords = self.multi_order_cfg().get("payment_keywords")
         payment = self.cfg.get("payment", {})
-        raw = multi_keywords or payment.get("keywords") or payment.get("keyword") or ""
-        if isinstance(raw, str):
-            values = re.split(r"[,，;；\n]+", raw)
-        else:
-            values = list(raw)
-        return [str(value).strip() for value in values if str(value).strip()]
+        options = normalize_payment_keyword_options(
+            payment.get("keyword_options"),
+            multi_keywords or payment.get("keywords") or payment.get("keyword") or "",
+        )
+        return enabled_payment_keywords(options)
 
     def current_payment_keyword(self) -> str:
         keywords = self.payment_keywords()

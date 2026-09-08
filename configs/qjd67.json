@@ -59,6 +59,12 @@
     "keywords": [
       "吕遇游戏"
     ],
+    "keyword_options": [
+      {
+        "keyword": "吕遇游戏",
+        "enabled": true
+      }
+    ],
     "card_index": 2,
     "scrolls": 0,
     "ocr_attempts": 15,

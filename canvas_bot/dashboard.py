@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .core.payment import enabled_payment_keywords, normalize_payment_keyword_options, split_payment_keywords
 from .secret_store import load as load_remembered_secrets, save as save_remembered_secrets
 
 
@@ -84,9 +85,11 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
     password = cfg.get("password", {})
     multi_order = cfg.get("multi_order", {})
     notification = cfg.get("notification", {})
-    raw_keywords = multi_order.get("payment_keywords") or payment.get("keywords") or [payment.get("keyword", "")]
-    if isinstance(raw_keywords, str):
-        raw_keywords = raw_keywords.splitlines()
+    options = normalize_payment_keyword_options(
+        payment.get("keyword_options"),
+        multi_order.get("payment_keywords") or payment.get("keywords") or payment.get("keyword", ""),
+    )
+    active_keywords = enabled_payment_keywords(options)
     return {
         "speed_mode": speed_mode if speed_mode in SPEED_PROFILES else "safe",
         "amount": str(cfg.get("amount", "")),
@@ -99,7 +102,8 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "auto_repost": bool(cfg.get("auto_repost", True)),
         "auto_accept": bool(cfg.get("auto_accept", True)),
         "payment_keyword": str(payment.get("keyword", "")),
-        "payment_keywords": "\n".join(str(value).strip() for value in raw_keywords if str(value).strip()),
+        "payment_keywords": "\n".join(active_keywords),
+        "payment_keyword_options": options,
         "multi_order_enabled": bool(multi_order.get("enabled", False)),
         "adopt_existing_pending_orders": bool(multi_order.get("adopt_existing_pending_orders", False)),
         "payment_ocr_attempts": payment.get("ocr_attempts", 8),
@@ -129,10 +133,17 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
     if limit_min and limit_max and Decimal(limit_min) > Decimal(limit_max):
         raise ValueError("最小限额不能大于最大限额")
 
-    raw_keywords = re_split_keywords(values.get("payment_keywords"))
-    if not raw_keywords:
-        raise ValueError("收款卡片关键词列表至少需要一项")
-    if any(len(item) > 80 for item in raw_keywords):
+    options = normalize_payment_keyword_options(values.get("payment_keyword_options"), values.get("payment_keywords"))
+    legacy_keywords = values.get("payment_keywords")
+    option_keywords = "\n".join(enabled_payment_keywords(options))
+    # Older callers only know about the textarea field. Keep accepting it when
+    # it was explicitly changed alongside the newly introduced option field.
+    if legacy_keywords is not None and str(legacy_keywords).strip() != option_keywords:
+        options = normalize_payment_keyword_options(legacy_keywords)
+    active_keywords = enabled_payment_keywords(options)
+    if not active_keywords:
+        raise ValueError("收款卡片关键词列表至少需要启用一项")
+    if any(len(item) > 80 for item in [option["keyword"] for option in options]):
         raise ValueError("收款方式关键词不能超过 80 个字符")
     transfer_name = str(values.get("pushplus_transfer_name") or "").strip()
     if len(transfer_name) > 40:
@@ -150,14 +161,15 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
     updated["auto_accept"] = _flag(values.get("auto_accept"))
 
     payment = updated.setdefault("payment", {})
-    payment["keyword"] = raw_keywords[0]
-    payment["keywords"] = raw_keywords
+    payment["keyword_options"] = options
+    payment["keyword"] = active_keywords[0]
+    payment["keywords"] = active_keywords
     payment["ocr_attempts"] = _integer(values.get("payment_ocr_attempts"), "收款卡片识别次数", minimum=1, maximum=30)
 
     multi_order = updated.setdefault("multi_order", {})
     multi_order["enabled"] = _flag(values.get("multi_order_enabled"))
     multi_order["adopt_existing_pending_orders"] = _flag(values.get("adopt_existing_pending_orders"))
-    multi_order["payment_keywords"] = raw_keywords
+    multi_order["payment_keywords"] = active_keywords
     multi_order.pop("minimum_remaining_balance", None)
 
     cancel_flow = updated.setdefault("cancel_flow", {})
@@ -189,7 +201,7 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
 
 
 def re_split_keywords(value: Any) -> list[str]:
-    return [item.strip() for item in str(value or "").replace("，", ",").replace(";", ",").split(",") for item in item.splitlines() if item.strip()]
+    return split_payment_keywords(value)
 
 
 def write_config(path: Path, cfg: dict[str, Any]) -> None:
@@ -502,7 +514,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 updated = validate_dashboard_settings(self.state.load_config(), self.read_json())
                 write_config(self.state.config_path, updated)
-                self.send_json({"ok": True, "message": "配置已保存；运行中的脚本需停止后重新启动才会读取新参数。"})
+                message = (
+                    "配置已保存；收款关键词已热更新，其他参数需停止后重新启动。"
+                    if self.state.running()
+                    else "配置已保存。"
+                )
+                self.send_json({"ok": True, "message": message})
                 return
             if path == "/api/password":
                 message = self.state.set_payment_password(self.read_json().get("password"))
@@ -579,9 +596,17 @@ DASHBOARD_HTML = r"""<!doctype html>
     input[type="text"], input[type="number"], select, textarea { width:100%; min-height:36px; border:1px solid var(--line); border-radius:5px; padding:6px 8px; color:var(--ink); background:#fff; }
     input[readonly] { color:#667085; background:#f3f5f8; cursor:not-allowed; }
     textarea { min-height:74px; resize:vertical; }
-    input:focus { outline:2px solid #b6d3ff; border-color:var(--blue); }
+    input:focus, select:focus, textarea:focus { outline:2px solid #b6d3ff; border-color:var(--blue); }
     .checks { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
     .checks label { display:flex; align-items:center; gap:7px; color:var(--ink); font-size:14px; }
+    .keyword-editor { grid-column:span 2; display:grid; gap:6px; }
+    .keyword-list { display:grid; gap:7px; max-height:210px; overflow:auto; padding:8px; border:1px solid var(--line); border-radius:5px; background:#f8fafc; }
+    .keyword-row { display:grid; grid-template-columns:18px minmax(0,1fr) 32px; gap:7px; align-items:center; }
+    .keyword-row input[type="checkbox"] { width:16px; height:16px; margin:0; accent-color:var(--blue); }
+    .keyword-row button { min-height:32px; padding:4px 8px; color:var(--red); font-size:18px; line-height:1; }
+    .keyword-add { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:7px; }
+    .hot-badge { color:var(--green); font-size:11px; font-weight:600; }
+    .keyword-empty { color:var(--muted); font-size:12px; padding:3px; }
     .form-footer { display:flex; gap:10px; justify-content:flex-end; align-items:center; }
     .hint, .status-text { color:var(--muted); font-size:12px; }
     .status-text.error { color:var(--red); }
@@ -603,13 +628,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     .dialog-head { padding:10px; display:flex; justify-content:flex-end; }
     dialog img { display:block; max-width:86vw; max-height:82vh; }
     @media (max-width:980px) { main { grid-template-columns:1fr; padding:14px; } .screens { grid-column:auto; } .header-inner { padding:12px 14px; } }
-    @media (max-width:600px) { .form-grid { grid-template-columns:1fr 1fr; } .runtime-grid { grid-template-columns:1fr 1fr; } }
+    @media (max-width:600px) { .form-grid { grid-template-columns:1fr 1fr; } .keyword-editor { grid-column:span 2; } .runtime-grid { grid-template-columns:1fr 1fr; } }
   </style>
 </head>
 <body>
   <header><div class="header-inner"><h1>NO钱包自动化控制台</h1><div class="actions"><span id="state" class="state">未运行</span><button id="start" class="primary" type="button">启动脚本</button><button id="stop" class="stop" type="button">停止脚本</button></div></div></header>
   <main>
-    <section class="panel"><header><h2>挂单参数</h2><span class="hint">保存后需重启脚本生效</span></header>
+    <section class="panel"><header><h2>挂单参数</h2><span class="hint">收款关键词热更新，其他参数重启生效</span></header>
       <form id="settings">
         <fieldset><legend>金额与限额</legend><div class="form-grid">
           <label>变现金额<input name="amount" type="text" inputmode="decimal"></label>
@@ -626,7 +651,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>挂单二次确认超时<input name="submit_secondary_confirm_timeout_sec" type="number" min="1" step="1"></label>
         </div></fieldset>
         <fieldset><legend>收款方式与自动操作</legend><div class="form-grid">
-          <label><span class="field-label">收款卡片关键词列表 <span class="info" tabindex="0" aria-label="填写规则" title="推荐每行一张收款卡关键词。也支持英文逗号、中文逗号、英文分号分隔；不要用空格分隔。脚本按填写顺序循环选择。">i</span></span><textarea name="payment_keywords" placeholder="每行一张卡关键词" title="推荐每行一张收款卡关键词。也支持英文逗号、中文逗号、英文分号分隔；不要用空格分隔。脚本按填写顺序循环选择。"></textarea></label>
+          <div class="keyword-editor"><span class="field-label">收款卡片关键词 <span class="hot-badge">热参数</span> <span class="info" tabindex="0" aria-label="填写规则" title="勾选的关键词会按顺序循环使用；保存后运行中的脚本也会读取最新勾选状态。">i</span></span><div id="payment-keyword-list" class="keyword-list"></div><div class="keyword-add"><input id="new-payment-keyword" type="text" maxlength="80" placeholder="添加关键词"><button id="add-payment-keyword" type="button">添加</button></div><span class="hint">至少启用一项；取消勾选即可暂时停用。</span></div>
           <label>卡片 OCR 查找次数<input name="payment_ocr_attempts" type="number" min="1" max="30" step="1"></label>
           <label>取消重试间隔<input name="cancel_retry_interval_sec" type="number" min="0.1" step="0.1"></label>
           <label>挂单二次确认等待 <span class="hint">由速度档位控制</span><input name="submit_secondary_confirm_delay_sec" type="number" min="0.1" step="0.1" readonly aria-readonly="true"></label>
@@ -658,13 +683,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       safe: { poll_interval_sec: 0.8, action_throttle_sec: 0.7, submit_secondary_confirm_delay_sec: 0.5 },
       fast: { poll_interval_sec: 0.5, action_throttle_sec: 0.45, submit_secondary_confirm_delay_sec: 0.35 },
     };
-    const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_keywords','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec','pushplus_transfer_name'];
+    const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec','pushplus_transfer_name'];
     const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
-    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); $('#payment-password').value = c.payment_password_value || ''; $('#pushplus-token').value = c.pushplus_token_value || ''; const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
+    function renderPaymentKeywords(options) { const list = $('#payment-keyword-list'); list.replaceChildren(); (options || []).forEach(option => { const row = document.createElement('div'); row.className = 'keyword-row'; const check = document.createElement('input'); check.type = 'checkbox'; check.checked = Boolean(option.enabled); check.title = '启用此关键词'; const input = document.createElement('input'); input.type = 'text'; input.maxLength = 80; input.value = option.keyword || ''; input.dataset.keyword = 'true'; input.setAttribute('aria-label', '收款关键词'); const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.removeKeyword = 'true'; remove.title = '删除关键词'; remove.setAttribute('aria-label', '删除关键词'); remove.textContent = '×'; row.append(check, input, remove); list.append(row); }); if (!list.children.length) { const empty = document.createElement('div'); empty.className = 'keyword-empty'; empty.textContent = '暂无关键词，请在下方添加。'; list.append(empty); } }
+    function collectPaymentKeywords() { return [...document.querySelectorAll('#payment-keyword-list .keyword-row')].map(row => ({keyword: row.querySelector('[data-keyword]').value.trim(), enabled: row.querySelector('input[type="checkbox"]').checked})).filter(option => option.keyword); }
+    function fill(c) { config = c; names.forEach(n => { const e = document.querySelector(`[name="${n}"]`); if (e) e.value = c[n] ?? ''; }); checks.forEach(n => document.querySelector(`[name="${n}"]`).checked = Boolean(c[n])); renderPaymentKeywords(c.payment_keyword_options || []); $('#payment-password').value = c.payment_password_value || ''; $('#pushplus-token').value = c.pushplus_token_value || ''; const source = c.password_source === 'dashboard' ? '控制台内存' : (c.password_source === 'environment' ? '环境变量' : '未配置'); const push = c.pushplus_source === 'dashboard' ? '控制台内存' : (c.pushplus_source === 'environment' ? '环境变量' : '未配置'); $('#password-state').textContent = `支付密码：${source}；PushPlus：${push}`; }
     function applySpeedProfile(mode) { const profile = speedProfiles[mode]; if (!profile) return; Object.entries(profile).forEach(([name, value]) => { const input = document.querySelector(`[name="${name}"]`); if (input) input.value = value; }); }
     async function loadConfig() { fill(await request('/api/config')); }
-    function collect() { const data = {}; names.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).value); checks.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).checked); return data; }
+    function collect() { const data = {}; names.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).value); checks.forEach(n => data[n] = document.querySelector(`[name="${n}"]`).checked); data.payment_keyword_options = collectPaymentKeywords(); return data; }
     async function save(e) { e.preventDefault(); const message = $('#save-message'); message.className = 'status-text'; message.textContent = '保存中...'; try { const data = await request('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collect())}); message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
     async function savePassword() { const input = $('#payment-password'); const message = $('#save-message'); try { const data = await request('/api/password', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:input.value})}); input.value = ''; message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
     async function savePushPlus() { const input = $('#pushplus-token'); const message = $('#save-message'); try { const data = await request('/api/pushplus', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token:input.value})}); input.value = ''; message.className = 'status-text ok'; message.textContent = data.message; await loadConfig(); } catch (err) { message.className = 'status-text error'; message.textContent = err.message; } }
@@ -672,9 +699,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     let logInitialized = false;
     function logNearBottom(log) { return log.scrollHeight - log.scrollTop - log.clientHeight < 18; }
     function renderLog(value) { const log = $('#log'); const follow = !logInitialized || logNearBottom(log); log.textContent = value || '暂无本控制台启动的日志。'; logInitialized = true; if (follow) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }); }
-    async function refresh() { try { const s = await request('/api/status'); $('#state').textContent = s.running ? '运行中' : '未运行'; $('#state').className = `state ${s.running ? 'on' : ''}`; $('#run-state').textContent = s.running ? '运行中' : '未运行'; $('#pid').textContent = s.pid || '-'; $('#config-state').textContent = s.running ? '重启后更新' : '已就绪'; renderLog(s.log); $('#start').disabled = s.running; $('#stop').disabled = !s.running; } catch (_) {} }
+    async function refresh() { try { const s = await request('/api/status'); $('#state').textContent = s.running ? '运行中' : '未运行'; $('#state').className = `state ${s.running ? 'on' : ''}`; $('#run-state').textContent = s.running ? '运行中' : '未运行'; $('#pid').textContent = s.pid || '-'; $('#config-state').textContent = s.running ? '关键词热更新；其余重启' : '已就绪'; renderLog(s.log); $('#start').disabled = s.running; $('#stop').disabled = !s.running; } catch (_) {} }
     async function shots() { const gallery = $('#gallery'); const list = await request('/api/screenshots'); gallery.replaceChildren(); list.forEach(item => { const wrap=document.createElement('div'); wrap.className='shot'; const button=document.createElement('button'); const image=document.createElement('img'); image.loading='lazy'; image.src=`/debug/${encodeURIComponent(item.name)}?t=${item.time}`; image.alt=item.name; button.append(image); button.onclick=()=>{ $('#preview img').src=image.src; $('#preview').showModal(); }; const label=document.createElement('small'); label.textContent=item.name; wrap.append(button,label); gallery.append(wrap); }); }
-    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#save-password').onclick=savePassword; $('#save-pushplus').onclick=savePushPlus; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
+    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#add-payment-keyword').onclick=()=>{ const input=$('#new-payment-keyword'); const keyword=input.value.trim(); if (!keyword) return; const options=collectPaymentKeywords(); if (!options.some(option=>option.keyword===keyword)) options.push({keyword, enabled:true}); renderPaymentKeywords(options); input.value=''; }; $('#payment-keyword-list').onclick=(event)=>{ const button=event.target.closest('[data-remove-keyword]'); if (button) { button.closest('.keyword-row').remove(); } }; $('#save-password').onclick=savePassword; $('#save-pushplus').onclick=savePushPlus; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
     Promise.all([loadConfig(), refresh(), shots()]); setInterval(refresh, 1500); setInterval(shots, 7000);
   </script>
 </body></html>"""
