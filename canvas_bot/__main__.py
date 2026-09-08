@@ -1000,13 +1000,12 @@ class BrowserSession:
             for digit in value:
                 await self.page.keyboard.insert_text(digit)
                 await self.page.wait_for_timeout(70)
-            try:
-                actual = await self.active_text_input_value()
-            except Exception:
-                return False
-            if actual != value:
-                print(f"[warn] Flutter 支付密码输入不完整：期望 {len(value)} 位，实际 {len(actual or '')} 位；本次不重试。")
-                return False
+            # Flutter's editing input is an event bridge, not a reliable
+            # password value store. The engine commonly clears its DOM value
+            # after forwarding each digit while the canvas keeps the masked
+            # value internally. The route transition is the authoritative
+            # success signal; never resend a password based on this DOM field.
+            await self.page.wait_for_timeout(120)
             return True
         # ``insert_text`` emits an input event directly. Some Flutter engines
         # ignore synthetic key events from ``type`` even though the hidden input

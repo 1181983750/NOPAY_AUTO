@@ -127,7 +127,9 @@ class PendingStateTests(unittest.TestCase):
         browser = BrowserSession.__new__(BrowserSession)
         browser.page = FakePage()
         browser.focus_flutter_text_input = lambda: asyncio.sleep(0, result=True)
-        browser.active_text_input_value = lambda: asyncio.sleep(0, result="990314")
+        # Flutter clears the bridge input after dispatching each digit; the
+        # canvas route, not this DOM value, confirms password acceptance.
+        browser.active_text_input_value = lambda: asyncio.sleep(0, result="")
 
         self.assertTrue(asyncio.run(browser.replace_numeric("990314", verify_and_repair=False)))
         self.assertEqual(browser.page.keyboard.inserted, list("990314"))
