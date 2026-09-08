@@ -11,6 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, VisionEngine, load_config
+from canvas_bot.dialogs.handlers import classify_modal_page
 
 
 class PendingStateTests(unittest.TestCase):
@@ -892,6 +893,26 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(bot.classify_visual_page(image, boxes), "submit_confirm_dialog")
         self.assertTrue(asyncio.run(bot.handle_submit_confirm_dialog(FakeBrowser(), Rect(0, 0, 568, 730), image, boxes)))
         self.assertEqual(clicked, ["确认"])
+
+    def test_password_dialog_overrides_underlying_submit_button(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "texts": {
+                "password_dialog": ["验证支付密码"],
+                "submit_confirm_title": ["确认变现"],
+            }
+        }
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (568, 730), "white")
+        boxes = [
+            TextBox("验证支付密码", 0.99, 220, 360, 350, 390),
+            TextBox("确认变现", 0.99, 245, 456, 326, 483),
+            TextBox("确认", 0.99, 263, 677, 307, 703),
+        ]
+
+        self.assertEqual(classify_modal_page(bot, SimpleNamespace(image=image, boxes=boxes)), "password_dialog")
 
     def test_runtime_password_dialog_does_not_repeat_an_unacknowledged_input(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

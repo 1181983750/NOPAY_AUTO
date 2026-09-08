@@ -32,6 +32,11 @@ def classify_modal_page(bot: Any, context: PageContext) -> str | None:
         return "system_notice_dialog"
     if bot.find_trade_notification(image, boxes):
         return "trade_notification"
+    # The password sheet is rendered above the form and can leave the form's
+    # bottom "确认变现" text visible underneath it. Check it before the
+    # underlying submit-confirm detector so the modal gets the right handler.
+    if bot.find_password_dialog(image, boxes):
+        return "password_dialog"
     if bot.find_submit_confirm_dialog(image, boxes):
         return "submit_confirm_dialog"
     if bot.find_trade_success_ack(image, boxes):
@@ -40,8 +45,6 @@ def classify_modal_page(bot: Any, context: PageContext) -> str | None:
         return "order_exception_dialog"
     if getattr(bot, "cancel_confirm_until", 0) and bot.find_cancel_confirm_target(image, boxes):
         return "cancel_confirm_dialog"
-    if bot.find_password_dialog(image, boxes):
-        return "password_dialog"
     return None
 
 
