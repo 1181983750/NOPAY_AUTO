@@ -105,6 +105,32 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertEqual(browser.page.keyboard.inserted, ["1500"])
 
+    def test_replace_numeric_enters_password_one_digit_at_a_time_and_verifies_once(self) -> None:
+        class FakeKeyboard:
+            def __init__(self) -> None:
+                self.inserted: list[str] = []
+
+            async def press(self, _key: str) -> None:
+                return None
+
+            async def insert_text(self, value: str) -> None:
+                self.inserted.append(value)
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.keyboard = FakeKeyboard()
+
+            async def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        browser = BrowserSession.__new__(BrowserSession)
+        browser.page = FakePage()
+        browser.focus_flutter_text_input = lambda: asyncio.sleep(0, result=True)
+        browser.active_text_input_value = lambda: asyncio.sleep(0, result="990314")
+
+        self.assertTrue(asyncio.run(browser.replace_numeric("990314", verify_and_repair=False)))
+        self.assertEqual(browser.page.keyboard.inserted, list("990314"))
+
     def test_vision_reuses_only_identical_canvas_frames(self) -> None:
         calls: list[object] = []
 
@@ -1257,6 +1283,42 @@ class PendingStateTests(unittest.TestCase):
         self.assertFalse(asyncio.run(bot.type_password_with_keyboard(browser, Rect(0, 0, 508, 900), "123456", image, [heading])))
         self.assertEqual(len(browser.clicks), 1)
         self.assertEqual(browser.replacements, ["123456"])
+
+    def test_password_dialog_layout_fallback_works_without_heading_ocr(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"texts": {"password_dialog": ["验证支付密码"]}}
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        slots = [(100 + index * 68, 420, 52, 58) for index in range(6)]
+        vision.find_text = lambda *_args, **_kwargs: None
+        vision.find_password_slots = lambda _image: slots
+        bot.vision = vision
+        image = Image.new("RGB", (508, 900), "white")
+
+        dialog = bot.find_password_dialog(image, [])
+        self.assertIsNotNone(dialog)
+        self.assertEqual(dialog.text, "支付密码输入框")
+        self.assertEqual(bot.resolve_password_field_target(image, []), (126, 449))
+
+    def test_password_dialog_failed_attempt_is_not_repeated(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.password_dialog_input_pending = False
+        bot.password_dialog_input_attempted = True
+        messages: list[str] = []
+        bot.record_state = lambda _key, message, interval_sec=0: messages.append(message)
+
+        self.assertTrue(
+            asyncio.run(
+                bot.handle_runtime_password_dialog(
+                    None,
+                    Rect(0, 0, 506, 900),
+                    Image.new("RGB", (506, 900), "white"),
+                    [],
+                )
+            )
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("停止重复输入", messages[0])
 
     def test_dashboard_password_is_used_when_config_has_no_password(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

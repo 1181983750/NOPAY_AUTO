@@ -439,6 +439,85 @@ class VisionEngine:
 
         return best[1] if best else None
 
+    def find_password_slots(self, image: Image.Image) -> list[tuple[float, float, float, float]]:
+        """Find the six outlined Flutter password slots when OCR misses the title."""
+        cv2 = getattr(self, "cv2", None)
+        if cv2 is None:
+            return []
+
+        width, height = image.size
+        gray = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 40, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        candidates: list[tuple[float, float, float, float]] = []
+        for contour in contours:
+            x, y, box_width, box_height = cv2.boundingRect(contour)
+            if not (width * 0.06 <= box_width <= width * 0.20):
+                continue
+            if not (height * 0.035 <= box_height <= height * 0.13):
+                continue
+            if not (0.55 <= box_width / max(box_height, 1) <= 2.4):
+                continue
+            if not (width * 0.08 <= x <= width * 0.92 and height * 0.20 <= y <= height * 0.82):
+                continue
+            candidates.append((float(x), float(y), float(box_width), float(box_height)))
+
+        # Rounded Flutter borders produce both an inner and an outer contour.
+        # Keep one representative for nearby contours before looking for a row.
+        candidates.sort(key=lambda item: item[2] * item[3], reverse=True)
+        unique: list[tuple[float, float, float, float]] = []
+        for candidate in candidates:
+            cx = candidate[0] + candidate[2] / 2
+            cy = candidate[1] + candidate[3] / 2
+            if any(
+                abs(cx - (item[0] + item[2] / 2)) <= max(8.0, candidate[2] * 0.28)
+                and abs(cy - (item[1] + item[3] / 2)) <= max(8.0, candidate[3] * 0.28)
+                for item in unique
+            ):
+                continue
+            unique.append(candidate)
+
+        unique.sort(key=lambda item: (item[1] + item[3] / 2, item[0]))
+        rows: list[list[tuple[float, float, float, float]]] = []
+        for candidate in unique:
+            center_y = candidate[1] + candidate[3] / 2
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if abs(center_y - (sum(box[1] + box[3] / 2 for box in item) / len(item)))
+                    <= max(14.0, candidate[3] * 0.45)
+                ),
+                None,
+            )
+            if row is None:
+                rows.append([candidate])
+            else:
+                row.append(candidate)
+
+        for row in rows:
+            row.sort(key=lambda item: item[0])
+            for start in range(max(0, len(row) - 5)):
+                group = row[start : start + 6]
+                widths = [item[2] for item in group]
+                heights = [item[3] for item in group]
+                median_width = sorted(widths)[2:4]
+                median_height = sorted(heights)[2:4]
+                ref_width = sum(median_width) / 2
+                ref_height = sum(median_height) / 2
+                if any(abs(item[2] - ref_width) > ref_width * 0.45 for item in group):
+                    continue
+                if any(abs(item[3] - ref_height) > ref_height * 0.45 for item in group):
+                    continue
+                centers = [item[0] + item[2] / 2 for item in group]
+                gaps = [right - left for left, right in zip(centers, centers[1:])]
+                if any(gap < ref_width * 1.15 or gap > ref_width * 3.6 for gap in gaps):
+                    continue
+                if centers[-1] - centers[0] < width * 0.32:
+                    continue
+                return group
+        return []
+
     def find_template(
         self,
         image: Image.Image,
@@ -893,9 +972,10 @@ class BrowserSession:
     async def replace_numeric(self, text: str, *, verify_and_repair: bool = True) -> bool:
         """Replace a numeric Flutter canvas field.
 
-        Password fields opt out of verification/repair: after six digits are
-        submitted, a delayed canvas update is normal and another synthetic
-        input event could be treated as a second password attempt.
+        Password fields pass ``verify_and_repair=False``. They are entered one
+        digit at a time so Flutter cannot drop characters from one large
+        ``insert_text`` event; a mismatch is reported as a failed attempt and
+        is never repaired by sending the password again.
         """
         assert self.page is not None
         value = "".join(char for char in str(text) if char.isdigit() or char == ".")
@@ -916,12 +996,22 @@ class BrowserSession:
         await self.page.keyboard.press("Backspace")
         for _ in range(24):
             await self.page.keyboard.press("Backspace")
+        if not verify_and_repair:
+            for digit in value:
+                await self.page.keyboard.insert_text(digit)
+                await self.page.wait_for_timeout(70)
+            try:
+                actual = await self.active_text_input_value()
+            except Exception:
+                return False
+            if actual != value:
+                print(f"[warn] Flutter 支付密码输入不完整：期望 {len(value)} 位，实际 {len(actual or '')} 位；本次不重试。")
+                return False
+            return True
         # ``insert_text`` emits an input event directly. Some Flutter engines
         # ignore synthetic key events from ``type`` even though the hidden input
         # has focus, leaving the canvas field visibly empty.
         await self.page.keyboard.insert_text(value)
-        if not verify_and_repair:
-            return True
         try:
             # Flutter can accept a password and begin an asynchronous route
             # change before its hidden DOM input reflects the final value.
@@ -994,6 +1084,7 @@ class CanvasBot:
         self.last_tick_error_capture_at = 0.0
         self.last_password_input_at = 0.0
         self.password_dialog_input_pending = False
+        self.password_dialog_input_attempted = False
         self._state_log_times: dict[str, float] = {}
         self._payment_config_mtime_ns: int | None = None
 
@@ -1796,12 +1887,33 @@ class CanvasBot:
         template = self.vision.find_template(image, "password_dialog")
         if template:
             return template
-        return self.vision.find_text(
+        heading = self.vision.find_text(
             boxes,
-            self.texts.get("password_dialog", []),
+            self.texts.get("password_dialog") or ["验证支付密码", "支付密码", "验证密码"],
             prefer_center=True,
             prefer_bottom=True,
             max_text_length=36,
+        )
+        if heading:
+            return heading
+
+        find_slots = getattr(self.vision, "find_password_slots", None)
+        slots = find_slots(image) if callable(find_slots) else []
+        if len(slots) != 6:
+            return None
+        first = slots[0]
+        last = slots[-1]
+        center_x = ((first[0] + first[2] / 2) + (last[0] + last[2] / 2)) / 2
+        slot_top = min(slot[1] for slot in slots)
+        # Return a synthetic heading so the existing modal/page flow can use the
+        # same target resolution even when OCR missed the dialog title.
+        return TextBox(
+            text="支付密码输入框",
+            confidence=0.60,
+            left=center_x - image.width * 0.20,
+            top=max(0.0, slot_top - image.height * 0.09),
+            right=center_x + image.width * 0.20,
+            bottom=max(0.0, slot_top - image.height * 0.03),
         )
 
     def resolve_password_field_target(
@@ -1810,6 +1922,12 @@ class CanvasBot:
         boxes: list[TextBox],
     ) -> tuple[float, float] | None:
         """Locate the center of the first six-digit password box from its heading."""
+        find_slots = getattr(self.vision, "find_password_slots", None)
+        slots = find_slots(image) if callable(find_slots) else []
+        if len(slots) == 6:
+            first = slots[0]
+            return first[0] + first[2] / 2, first[1] + first[3] / 2
+
         heading = self.find_password_dialog(image, boxes)
         if not heading:
             return None
@@ -2747,6 +2865,13 @@ class CanvasBot:
                 interval_sec=5.0,
             )
             return True
+        if getattr(self, "password_dialog_input_attempted", False):
+            self.record_state(
+                "password_dialog_attempted",
+                "支付密码本次输入未确认成功，已停止重复输入；请检查弹窗或手动处理。",
+                interval_sec=5.0,
+            )
+            return True
         now = time.time()
         if now - self.last_password_input_at < 3.0:
             return False
@@ -2756,6 +2881,7 @@ class CanvasBot:
             return False
 
         self.last_password_input_at = now
+        self.password_dialog_input_attempted = True
         password_cfg = self.password_cfg()
         mode = password_cfg.get("input_mode", "keyboard")
         self.record_action("检测到运行中支付密码，输入支付密码")
@@ -2764,6 +2890,7 @@ class CanvasBot:
         else:
             entered = await self.type_password_with_keyboard(browser, rect, password, image, boxes)
         if not entered:
+            print("[warn] 支付密码未确认输入完整，本次挂单停止且不重复输入。")
             return False
         self.password_dialog_input_pending = True
         await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
@@ -2874,6 +3001,8 @@ class CanvasBot:
                     password_scan[2],
                 )
             if not entered:
+                self.password_dialog_input_attempted = True
+                print("[warn] 支付密码未确认输入完整，本次挂单停止且不重复输入。")
                 return False
             self.password_dialog_input_pending = True
             await asyncio.sleep(float(password_cfg.get("post_input_wait_sec", 0.8)))
@@ -3615,6 +3744,7 @@ class CanvasBot:
 
         if page != "password_dialog":
             self.password_dialog_input_pending = False
+            self.password_dialog_input_attempted = False
 
         if page != "unknown":
             self.unknown_page_streak = 0

@@ -43,7 +43,7 @@
     "secondary_confirm_delay_sec": 0.35,
     "secondary_confirm_timeout_sec": 3.0,
     "password_delay_sec": 0.7,
-    "password_timeout_sec": 2.0,
+    "password_timeout_sec": 8.0,
     "return_to_start_timeout_sec": 15.0,
     "state_poll_sec": 0.25
   },
@@ -227,7 +227,9 @@
       "完成"
     ],
     "password_dialog": [
-      "验证支付密码"
+      "验证支付密码",
+      "支付密码",
+      "验证密码"
     ],
     "password_confirm": [
       ""
