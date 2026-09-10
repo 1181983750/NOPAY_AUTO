@@ -245,48 +245,48 @@ class PendingStateTests(unittest.TestCase):
             {"amount": "4164.6", "limit_min": "1500", "limit_max": "4164", "use_all_balance": "true"},
         )
 
-    def test_form_balance_replans_stale_multi_order_to_use_all(self) -> None:
+    def test_form_submission_keeps_plan_without_rechecking_form_balance(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
-        bot.cfg = {"amount": "3000", "limit_min": "1000", "limit_max": "3000"}
-        bot.multi_batch_complete = False
+        bot.cfg = {
+            "amount": "3000",
+            "limit_min": "1200",
+            "limit_max": "3000",
+            "multi_order": {"enabled": True},
+        }
         bot.form_values = {
             "amount": "3000",
-            "limit_min": "1000",
+            "limit_min": "1200",
             "limit_max": "3000",
             "use_all_balance": "false",
         }
+        bot.last_form_submit_at = 0.0
+        bot.form_submission_failed = False
+        bot.find_available_balance = lambda *_args: (_ for _ in ()).throw(AssertionError("不应在变现页重新读取余额"))
+        filled: list[tuple[str, str]] = []
 
-        self.assertTrue(bot.replan_form_values_for_current_balance(Decimal("1816.75"), "3000"))
-        self.assertEqual(
-            bot.form_values,
-            {"amount": "1816.75", "limit_min": "1000", "limit_max": "1816", "use_all_balance": "true"},
+        async def fill_field(_browser, label, _terms, _x_ratio, value):
+            filled.append((label, value))
+            return True
+
+        async def keep_default(_browser, _expected):
+            return True
+
+        async def select_card(_browser, _rect):
+            return True
+
+        async def submit_form(_browser, _rect):
+            return True
+
+        bot.fill_canvas_text_field = fill_field
+        bot.keep_default_canvas_limit_max = keep_default
+        bot.select_canvas_payment_card = select_card
+        bot.submit_canvas_order_form = submit_form
+
+        self.assertTrue(
+            asyncio.run(bot.fill_and_submit_canvas_order_form(None, Rect(0, 0, 506, 900)))
         )
-
-    def test_form_balance_replans_existing_all_order_when_balance_increases(self) -> None:
-        bot = CanvasBot.__new__(CanvasBot)
-        bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}
-        bot.multi_batch_complete = False
-        bot.form_values = {
-            "amount": "3000.81",
-            "limit_min": "1500",
-            "limit_max": "3000",
-            "use_all_balance": "true",
-        }
-
-        self.assertTrue(bot.replan_form_values_for_current_balance(Decimal("4010.81"), "3000.81"))
-        self.assertEqual(
-            bot.form_values,
-            {"amount": "4010.81", "limit_min": "1500", "limit_max": "4010", "use_all_balance": "true"},
-        )
-
-    def test_form_balance_below_minimum_refuses_stale_multi_order(self) -> None:
-        bot = CanvasBot.__new__(CanvasBot)
-        bot.cfg = {"amount": "3000", "limit_min": "1500", "limit_max": "3000"}
-        bot.multi_batch_complete = False
-        bot.form_values = {"amount": "3000", "use_all_balance": "false"}
-
-        self.assertFalse(bot.replan_form_values_for_current_balance(Decimal("1164.6"), "3000"))
-        self.assertTrue(bot.multi_batch_complete)
+        self.assertEqual(filled, [("变现金额", "3000"), ("最小限额", "1200")])
+        self.assertFalse(bot.form_submission_failed)
 
     def test_withdraw_unavailable_page_uses_dynamic_left_back_position(self) -> None:
         class FakeBrowser:

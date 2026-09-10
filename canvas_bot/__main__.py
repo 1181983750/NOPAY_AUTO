@@ -1432,32 +1432,6 @@ class CanvasBot:
         }
         return True
 
-    def replan_form_values_for_current_balance(self, balance: Decimal, planned_amount: str) -> bool:
-        """Refresh a stale multi-order plan using the balance rendered on the form itself."""
-        planned = self.parse_money(planned_amount)
-        uses_all_balance = self.form_values.get("use_all_balance") == "true"
-        # A plan that uses 全部 is tied to the live form balance.  The balance can
-        # increase while the page opens (for example, a previous order settles),
-        # so keeping the old smaller plan would make the later visual check reject
-        # a correctly filled 全部 amount.
-        if planned is None or (balance >= planned and (not uses_all_balance or balance == planned)):
-            return True
-        if balance < planned:
-            print(
-                "[state] 变现表单余额 "
-                f"{self.decimal_text(balance)} 小于计划金额 {self.decimal_text(planned)}，重新规划本次挂单。"
-            )
-        else:
-            print(
-                "[state] 变现表单余额变为 "
-                f"{self.decimal_text(balance)}，同步全部变现金额与最大限额。"
-            )
-        if not self.prepare_multi_order_values(balance):
-            print("[state] 表单实时余额低于配置最小限额，返回搬砖页等待余额恢复。")
-            return False
-        print(f"[action] 本次使用变现金额全部：{self.form_values['amount']}")
-        return True
-
     def can_act(self) -> bool:
         throttle = float(self.cfg.get("action_throttle_sec", 1.2))
         floor = 0.45 if str(self.cfg.get("speed_mode") or "safe").lower() == "fast" else 0.7
@@ -3132,19 +3106,6 @@ class CanvasBot:
         if not amount:
             print("[warn] 请先在 configs/qjd67.json 填写 amount。")
             return True
-
-        # The available balance can change between clicking 开始搬砖 and the
-        # form becoming interactive (for example when another pending order is
-        # settled). Re-read the balance rendered by this form before typing so
-        # a stale 3000 plan does not exceed a now-smaller available balance.
-        if self.multi_order_enabled():
-            _, form_image, form_boxes = await self.scan_app(browser)
-            form_balance = self.find_available_balance(form_image, form_boxes)
-            if form_balance is not None and not self.replan_form_values_for_current_balance(form_balance, amount):
-                self.form_submission_failed = True
-                return True
-            values = self.form_values
-            amount = values.get("amount") or amount
 
         fill_amount = (
             self.fill_canvas_all_balance(browser, amount)
