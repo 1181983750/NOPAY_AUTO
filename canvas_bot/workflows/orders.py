@@ -24,4 +24,9 @@ class OrderWorkflow:
 
     async def run_withdraw_form(self, context: PageContext) -> bool:
         self.bot.move_page_opened = True
-        return await self.bot.handle_withdraw_form_page(context.browser, context.rect)
+        return await self.bot.handle_withdraw_form_page(
+            context.browser,
+            context.rect,
+            context.image,
+            context.boxes,
+        )

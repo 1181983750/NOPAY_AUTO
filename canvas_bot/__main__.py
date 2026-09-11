@@ -1697,6 +1697,19 @@ class CanvasBot:
         limit = self.vision.find_text(boxes, self.texts.get("limit", []), max_text_length=36)
         return bool(amount or (submit and limit))
 
+    def is_withdraw_page_title_visible(self, image: Image.Image, boxes: list[TextBox]) -> bool:
+        """Keep a scrolled withdraw form routable when its fields are off-screen."""
+        width, height = image.size
+        return bool(
+            self.vision.find_text(
+                boxes,
+                ["变现"],
+                min_confidence=0.55,
+                max_text_length=8,
+                bounds=(width * 0.32, 0, width * 0.68, height * 0.14),
+            )
+        )
+
     def find_start_order_target(self, image: Image.Image, boxes: list[TextBox]) -> TextBox | TemplateMatch | None:
         template = self.vision.find_template(image, "start_order")
         if template:
@@ -1807,6 +1820,8 @@ class CanvasBot:
         if self.is_withdraw_unavailable_page(image, boxes):
             return "withdraw_unavailable"
         if self.is_order_form_visible(image, boxes):
+            return "withdraw_form"
+        if self.is_withdraw_page_title_visible(image, boxes):
             return "withdraw_form"
         if self.is_order_detail_interrupt_page(image, boxes):
             return "order_detail"
@@ -3523,7 +3538,13 @@ class CanvasBot:
         await asyncio.sleep(0.45)
         return True
 
-    async def handle_withdraw_form_page(self, browser: BrowserSession, rect: Rect) -> bool:
+    async def handle_withdraw_form_page(
+        self,
+        browser: BrowserSession,
+        rect: Rect,
+        image: Image.Image | None = None,
+        boxes: list[TextBox] | None = None,
+    ) -> bool:
         """Only the withdraw form handler may type form values or submit a new order."""
         if self.form_submission_failed:
             if getattr(self, "failed_form_exit_attempted", False):
@@ -3539,8 +3560,12 @@ class CanvasBot:
                 self.record_state("form_submission_failed", "变现表单视觉校验失败，等待返回搬砖页。", interval_sec=5.0)
                 return True
             self.record_action("变现表单视觉校验失败，点击左上角返回搬砖页重新读取余额")
-            back = self.points.get("order_detail_back", [0.08, 0.04])
-            await browser.click_relative(rect, float(back[0]), float(back[1]))
+            if image is not None and boxes is not None:
+                back = self.resolve_top_left_back_point(image, boxes)
+                await browser.click_relative(rect, float(back[0]), float(back[1]))
+            else:
+                back = self.points.get("order_detail_back", [0.08, 0.04])
+                await browser.click_relative(rect, float(back[0]), float(back[1]))
             self.failed_form_exit_attempted = True
             self.last_failed_form_back_at = now
             self.next_post_after = now + 1.5

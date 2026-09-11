@@ -1024,6 +1024,29 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertEqual(bot.classify_visual_page(image, boxes), "withdraw_form")
 
+    def test_page_classifier_keeps_scrolled_withdraw_form_routable_from_title(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {
+            "texts": {
+                "move_page_tab": ["搬砖"],
+                "order_page_tab": ["订单"],
+                "amount": ["变现金额"],
+                "submit": ["确认变现"],
+                "limit": ["单笔限额"],
+            }
+        }
+        vision = VisionEngine.__new__(VisionEngine)
+        vision.find_template = lambda image, name: None
+        bot.vision = vision
+        image = Image.new("RGB", (574, 1018), "white")
+        boxes = [
+            TextBox("变现", 0.99, 264, 12, 310, 54),
+            TextBox("高级设置", 0.99, 38, 465, 146, 500),
+            TextBox("确定变现", 0.99, 232, 950, 342, 988),
+        ]
+
+        self.assertEqual(bot.classify_visual_page(image, boxes), "withdraw_form")
+
     def test_page_classifier_identifies_empty_orders_before_navigation(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
         bot.cfg = {
@@ -1186,6 +1209,30 @@ class PendingStateTests(unittest.TestCase):
 
         self.assertTrue(asyncio.run(bot.handle_withdraw_form_page(browser, Rect(0, 0, 506, 900))))
         self.assertEqual(browser.relative_clicks, [(0.08, 0.04)])
+
+    def test_failed_scrolled_withdraw_form_uses_visible_left_edge_for_back(self) -> None:
+        class FakeBrowser:
+            def __init__(self) -> None:
+                self.relative_clicks: list[tuple[float, float]] = []
+
+            async def click_relative(self, _rect, x: float, y: float) -> None:
+                self.relative_clicks.append((x, y))
+
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"action_throttle_sec": 0.1, "points": {"order_detail_back": [0.08, 0.04]}}
+        bot.last_failed_form_back_at = 0.0
+        bot.last_action_at = 0.0
+        bot.form_submission_failed = True
+        bot.next_post_after = 0.0
+        image = Image.new("RGB", (574, 1018), "white")
+        boxes = [TextBox("高级设置", 0.99, 40, 465, 146, 500)]
+        browser = FakeBrowser()
+
+        self.assertTrue(
+            asyncio.run(bot.handle_withdraw_form_page(browser, Rect(0, 0, 574, 1018), image, boxes))
+        )
+        self.assertAlmostEqual(browser.relative_clicks[0][0], (40 + 5.74) / 574, places=3)
+        self.assertEqual(browser.relative_clicks[0][1], 0.04)
 
     def test_buyer_detail_interrupt_clears_failed_form_and_returns(self) -> None:
         class FakeBrowser:
