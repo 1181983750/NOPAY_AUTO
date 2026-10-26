@@ -6,11 +6,11 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from PIL import Image
 
-from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, VisionEngine, load_config
+from canvas_bot.__main__ import BrowserSession, CanvasBot, ROOT, Rect, TextBox, VisionEngine, load_config, snapshot
 from canvas_bot.dialogs.handlers import classify_modal_page
 
 
@@ -364,7 +364,6 @@ class PendingStateTests(unittest.TestCase):
             return True
 
         bot.start_order_flow = start_order
-        bot.save_action_debug = lambda *_args: None
 
         self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(None, Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(started, [True])
@@ -402,7 +401,6 @@ class PendingStateTests(unittest.TestCase):
             return True
 
         bot.start_order_flow = start_order
-        bot.save_action_debug = lambda *_args: None
 
         browser = FakeBrowser()
         self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(browser, Rect(0, 0, 506, 900), image, boxes)))
@@ -428,7 +426,6 @@ class PendingStateTests(unittest.TestCase):
             TextBox("4", 0.99, 30, 168, 70, 205),
             TextBox("变现中", 0.99, 390, 420, 470, 450),
         ]
-        bot.save_action_debug = lambda *_args: None
 
         self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(None, Rect(0, 0, 506, 900), image, boxes)))
         self.assertEqual(len(bot.multi_pending_since), 1)
@@ -464,13 +461,9 @@ class PendingStateTests(unittest.TestCase):
         ]
         browser = FakeBrowser()
 
-        async def save_debug(*_args) -> None:
-            return None
-
         async def click_target(_browser, _rect, target) -> None:
             browser.clicked.append(target.text)
 
-        bot.save_action_debug = save_debug
         bot.click_visual_target = click_target
 
         self.assertTrue(asyncio.run(bot.handle_multi_order_workflow(browser, Rect(0, 0, 506, 900), image, boxes)))
@@ -664,13 +657,9 @@ class PendingStateTests(unittest.TestCase):
         accept = TextBox("同意交易", 0.99, 330, 780, 480, 840)
         clicked: list[str] = []
 
-        async def save_debug(*_args) -> None:
-            return None
-
         async def click_target(_browser, _rect, target) -> None:
             clicked.append(target.text)
 
-        bot.save_action_debug = save_debug
         bot.click_visual_target = click_target
 
         async def unexpected_notification(*_args) -> None:
@@ -702,7 +691,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
 
         async def unexpected_notification(*_args) -> None:
             raise AssertionError("订单异常不应触发 PushPlus")
@@ -741,7 +729,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda _image, _name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         clicked: list[str] = []
 
         async def click_target(_browser, _rect, target) -> None:
@@ -798,7 +785,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         clicked: list[str] = []
 
         async def click_target(_browser, _rect, target) -> None:
@@ -833,7 +819,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (595, 726), "white")
         boxes = [
             TextBox("安全通知", 0.99, 250, 235, 346, 260),
@@ -879,7 +864,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         clicked: list[str] = []
 
         async def click_target(_browser, _rect, target) -> None:
@@ -946,7 +930,6 @@ class PendingStateTests(unittest.TestCase):
         bot = CanvasBot.__new__(CanvasBot)
         bot.last_orders_refresh_at = 0.0
         bot.last_action_at = 0.0
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (506, 900), "white")
         browser = FakeBrowser()
 
@@ -967,7 +950,6 @@ class PendingStateTests(unittest.TestCase):
         bot.unknown_page_streak = 5
         bot.last_unknown_page_reload_at = 0.0
         bot.last_action_at = 0.0
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (506, 900), "white")
         browser = FakeBrowser()
 
@@ -975,7 +957,7 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(browser.reloads, 1)
         self.assertEqual(bot.unknown_page_streak, 0)
 
-    def test_unknown_page_saves_one_diagnostic_before_reload(self) -> None:
+    def test_unknown_page_logs_diagnostic_without_writing_images(self) -> None:
         class FakeBrowser:
             async def reload(self) -> None:
                 return None
@@ -984,20 +966,75 @@ class PendingStateTests(unittest.TestCase):
         bot.cfg = {
             "unknown_page_refresh": {"consecutive_scans": 6, "cooldown_sec": 20},
             "diagnostics": {"capture_unknown_after_scans": 3},
+            "debug": {"save_each_tick": True, "save_on_action": True, "draw_ocr": True},
         }
         bot.unknown_page_streak = 2
         bot.last_unknown_page_reload_at = 0.0
-        saved: list[str] = []
-
-        async def save_debug(_image, _boxes, note, *, force=False) -> None:
-            if force:
-                saved.append(note)
-
-        bot.maybe_save_debug = save_debug
         image = Image.new("RGB", (506, 900), "white")
 
-        self.assertTrue(asyncio.run(bot.handle_unknown_page(FakeBrowser(), Rect(0, 0, 506, 900), image, [])))
-        self.assertEqual(saved, ["unknown_page"])
+        with patch.object(Image.Image, "save", side_effect=AssertionError("Unexpected image write")), patch("builtins.print") as log:
+            for _ in range(2):
+                self.assertTrue(asyncio.run(bot.handle_unknown_page(FakeBrowser(), Rect(0, 0, 506, 900), image, [])))
+        diagnostics = [call for call in log.call_args_list if "[diagnostic]" in call.args[0]]
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("未知页面持续 3 次扫描", diagnostics[0].args[0])
+
+    def test_error_diagnostics_are_log_only_and_rate_limited(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"debug": {"save_each_tick": True, "save_on_action": True}}
+        bot.last_tick_error_capture_at = 0.0
+        bot.vision = Mock()
+        browser = Mock()
+        browser.diagnostics = AsyncMock(return_value={"title": "Test", "url": "about:blank"})
+        browser.screenshot_app = AsyncMock(side_effect=AssertionError("Unexpected screenshot"))
+
+        with patch("canvas_bot.__main__.time.time", side_effect=[100.0, 101.0, 131.0]), patch("builtins.print") as log:
+            for _ in range(3):
+                asyncio.run(bot.capture_tick_error(browser, RuntimeError("test")))
+
+        self.assertEqual(browser.diagnostics.await_count, 2)
+        browser.screenshot_app.assert_not_awaited()
+        bot.vision.read_text.assert_not_called()
+        self.assertEqual(log.call_count, 2)
+
+    def test_tick_recognizes_and_routes_page_with_legacy_screenshot_flags(self) -> None:
+        image = Image.new("RGB", (506, 900), "white")
+        boxes = [TextBox("搬砖", 0.99, 1, 1, 20, 20)]
+        rect = Rect(0, 0, 506, 900)
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.cfg = {"debug": {"save_each_tick": True, "save_on_action": True, "draw_ocr": True}}
+        bot.vision = Mock(read_text=Mock(return_value=boxes))
+        bot.runtime_monitor = Mock()
+        bot.classify_visual_page = Mock(return_value="move_page")
+        bot.note_visual_page = Mock()
+        bot.form_submission_failed = False
+        bot.handle_modal_page = AsyncMock(return_value=False)
+        bot.handle_content_page = AsyncMock()
+        browser = Mock(app_rect=AsyncMock(return_value=rect), screenshot_app=AsyncMock(return_value=image))
+
+        with patch.object(Image.Image, "save", side_effect=AssertionError("Unexpected image write")), patch("builtins.print"):
+            asyncio.run(bot.tick(browser))
+
+        bot.vision.read_text.assert_called_once_with(image)
+        bot.handle_content_page.assert_awaited_once_with("move_page", browser, rect, image, boxes)
+
+    def test_snapshot_recognizes_text_without_writing_images(self) -> None:
+        image = Image.new("RGB", (506, 900), "white")
+        browser = Mock()
+        browser.diagnostics = AsyncMock(return_value={"title": "Test", "url": "about:blank"})
+        browser.app_rect = AsyncMock(return_value=Rect(0, 0, 506, 900))
+        browser.screenshot_app = AsyncMock(return_value=image)
+        session = AsyncMock()
+        session.__aenter__.return_value = browser
+        vision = Mock(ocr_name="test", read_text=Mock(return_value=[TextBox("测试", 0.99, 1, 1, 20, 20)]))
+
+        with patch("canvas_bot.__main__.BrowserSession", return_value=session), patch(
+            "canvas_bot.__main__.CanvasBot", return_value=SimpleNamespace(vision=vision)
+        ), patch.object(Image.Image, "save", side_effect=AssertionError("Unexpected image write")), patch("builtins.print") as log:
+            asyncio.run(snapshot({"debug": {"save_each_tick": True, "save_on_action": True}}))
+
+        vision.read_text.assert_called_once_with(image)
+        self.assertTrue(any("测试" in call.args[0] for call in log.call_args_list))
 
     def test_page_classifier_prefers_withdraw_form_over_visible_navigation(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)
@@ -1151,7 +1188,6 @@ class PendingStateTests(unittest.TestCase):
         bot.cfg = {"action_throttle_sec": 0.7, "points": {"order_detail_back": [0.08, 0.04]}}
         bot.last_action_at = 0.0
         bot.last_order_detail_back_at = 0.0
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         browser = FakeBrowser()
 
         self.assertTrue(
@@ -1178,7 +1214,6 @@ class PendingStateTests(unittest.TestCase):
         bot.cfg = {"action_throttle_sec": 0.1, "points": {"order_detail_back": [0.08, 0.04]}}
         bot.last_action_at = 0.0
         bot.last_order_detail_back_at = 0.0
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (574, 722), "white")
         boxes = [TextBox("挂单单号", 0.99, 110, 120, 190, 145)]
         browser = FakeBrowser()
@@ -1259,7 +1294,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (506, 900), "white")
         boxes = [TextBox("买家详情", 0.99, 190, 20, 315, 55)]
         browser = FakeBrowser()
@@ -1290,7 +1324,6 @@ class PendingStateTests(unittest.TestCase):
         vision = VisionEngine.__new__(VisionEngine)
         vision.find_template = lambda image, name: None
         bot.vision = vision
-        bot.save_action_debug = lambda *_args: asyncio.sleep(0)
         image = Image.new("RGB", (506, 900), "white")
         boxes = [TextBox("出售详情", 0.99, 190, 20, 315, 55)]
         browser = FakeBrowser()

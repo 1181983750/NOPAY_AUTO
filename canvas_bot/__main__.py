@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from .core.context import PageContext
 from .core.models import Rect, TemplateMatch, TextBox
@@ -566,26 +566,6 @@ class VisionEngine:
                 best = match
 
         return best
-
-    def save_debug(
-        self,
-        image: Image.Image,
-        boxes: list[TextBox],
-        path: Path,
-        *,
-        note: str = "",
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        out = image.convert("RGB")
-        draw = ImageDraw.Draw(out)
-        for box in boxes:
-            draw.rectangle((box.left, box.top, box.right, box.bottom), outline=(255, 80, 80), width=2)
-            label = f"{box.text} {box.confidence:.2f}"
-            draw.text((box.left, max(0, box.top - 14)), label, fill=(255, 80, 80))
-        if note:
-            draw.text((8, 8), note, fill=(20, 180, 20))
-        out.save(path)
-
 
 class BrowserSession:
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -1135,10 +1115,6 @@ class CanvasBot:
     def points(self) -> dict[str, Any]:
         return self.cfg.get("points", {})
 
-    @property
-    def debug_dir(self) -> Path:
-        return resolve_path(self.cfg.get("debug", {}).get("dir", "debug-screenshots"))
-
     def point(self, key: str) -> tuple[float, float]:
         value = self.points[key]
         return float(value[0]), float(value[1])
@@ -1270,7 +1246,7 @@ class CanvasBot:
         return max(2, min(scans, 30)), max(5.0, cooldown)
 
     def diagnostics_cfg(self) -> tuple[int, float]:
-        """Return bounded diagnostic capture thresholds without retaining page data."""
+        """Return bounded text diagnostic thresholds without retaining page data."""
         cfg = self.cfg.get("diagnostics", {})
         try:
             unknown_after_scans = int(cfg.get("capture_unknown_after_scans", 3))
@@ -1941,12 +1917,9 @@ class CanvasBot:
         """Wait for a canvas-only state using fresh Playwright screenshots."""
         cfg = self.submit_flow_cfg()
         deadline = time.time() + max(0.1, timeout_sec)
-        last_scan: tuple[Rect, Image.Image, list[TextBox]] | None = None
-
         while time.time() <= deadline:
             scan = await self.scan_app(browser)
             rect, image, boxes = scan
-            last_scan = scan
             modal_page = await self.handle_global_interrupt_modal(browser, rect, image, boxes)
             if modal_page:
                 if modal_page == "trade_notification":
@@ -1964,9 +1937,6 @@ class CanvasBot:
                 return scan
             await asyncio.sleep(max(0.15, cfg["state_poll_sec"]))
 
-        if last_scan:
-            _, image, boxes = last_scan
-            await self.save_action_debug(image, boxes, f"state_timeout_{state}")
         print(f"[warn] Playwright 未在 {timeout_sec:.1f}s 内检测到状态：{state}")
         return None
 
@@ -2258,54 +2228,20 @@ class CanvasBot:
         cx, cy = target.center
         await browser.click_abs(rect.left + cx, rect.top + cy)
 
-    async def maybe_save_debug(
-        self,
-        image: Image.Image,
-        boxes: list[TextBox],
-        note: str = "",
-        *,
-        force: bool = False,
-    ) -> None:
-        debug = self.cfg.get("debug", {})
-        if not force and not debug.get("save_each_tick") and not debug.get("save_on_action"):
-            return
-        if not force and not debug.get("save_each_tick"):
-            return
-        path = self.debug_dir / f"{int(time.time())}_{note or 'tick'}.png"
-        if debug.get("draw_ocr", True):
-            self.vision.save_debug(image, boxes, path, note=note)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(path)
-
-    async def save_action_debug(self, image: Image.Image, boxes: list[TextBox], note: str) -> None:
-        if not self.cfg.get("debug", {}).get("save_on_action", True):
-            return
-        path = self.debug_dir / f"{int(time.time())}_{note}.png"
-        if self.cfg.get("debug", {}).get("draw_ocr", True):
-            self.vision.save_debug(image, boxes, path, note=note)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(path)
-
     async def capture_tick_error(self, browser: BrowserSession, error: Exception) -> None:
-        """Save a rate-limited visual error scene and non-sensitive browser context."""
+        """Log rate-limited browser context without taking or saving another screenshot."""
         _unknown_after_scans, cooldown_sec = self.diagnostics_cfg()
         now = time.time()
         if now - self.last_tick_error_capture_at < cooldown_sec:
             return
         self.last_tick_error_capture_at = now
         try:
-            rect = await browser.app_rect()
-            image = await browser.screenshot_app(rect)
-            boxes = self.vision.read_text(image)
-            await self.maybe_save_debug(image, boxes, "tick_error", force=True)
             diagnostics = await browser.diagnostics()
             title = str(diagnostics.get("title", ""))[:120]
             url = str(diagnostics.get("url", ""))[:240]
-            print(f"[diagnostic] 已保存异常现场：{type(error).__name__}; title={title!r}; url={url!r}")
+            print(f"[diagnostic] 异常页面信息：{type(error).__name__}; title={title!r}; url={url!r}")
         except Exception as capture_error:
-            print(f"[diagnostic] 无法保存异常现场：{capture_error}")
+            print(f"[diagnostic] 无法读取异常页面信息：{capture_error}")
 
     async def scan_app(
         self,
@@ -2343,12 +2279,10 @@ class CanvasBot:
                 exclude=(self.texts.get("done", []) + self.texts.get("dangerous_confirm", [])),
             )
             if not target:
-                await self.save_action_debug(image, boxes, "trade_notification_accept_not_found")
                 print("[state] 检测到交易通知，等待识别同意交易按钮。")
                 return True
             if now - self.last_accept_at < 0.5:
                 return True
-            await self.save_action_debug(image, boxes, "trade_notification_accept")
             self.record_action("交易通知，按文字点击同意交易")
             self.last_accept_at = now
             self.form_expected_after = 0
@@ -2371,7 +2305,6 @@ class CanvasBot:
             self.payment_selected_for_form = False
             self.form_values = {}
             if now - self.last_form_interruption_back_at >= 1.5:
-                await self.save_action_debug(image, boxes, "order_interrupt_back")
                 self.record_action("挂单被订单详情打断，返回后检查订单状态")
                 back = self.resolve_top_left_back_point(image, boxes)
                 await browser.click_relative(rect, float(back[0]), float(back[1]))
@@ -2382,7 +2315,6 @@ class CanvasBot:
         if self.is_waiting_transfer(image, boxes) and not self.is_orders_page(image, boxes):
             if self.is_waiting_transfer_detail(image, boxes):
                 if now - self.last_waiting_transfer_back_at >= 1.5:
-                    await self.save_action_debug(image, boxes, "waiting_transfer_back")
                     self.record_action("订单待付款，点击左上角返回搬砖列表")
                     back = self.resolve_top_left_back_point(image, boxes)
                     await browser.click_relative(rect, float(back[0]), float(back[1]))
@@ -2430,7 +2362,6 @@ class CanvasBot:
         if not self.can_act():
             return True
 
-        await self.save_action_debug(image, boxes, "accept")
         self.record_action("来单，点击同意接单")
         self.last_accept_at = now
         self.pending_since = 0
@@ -2448,13 +2379,11 @@ class CanvasBot:
         """Dismiss the timeout reminder without opening its detail page."""
         target = self.find_order_exception_ignore(image, boxes)
         if not target:
-            await self.save_action_debug(image, boxes, "order_exception_ignore_not_found")
             print("[warn] 识别到订单异常提醒，但未找到忽略按钮，不点击立即查看。")
             return True
         now = time.time()
         if now - self.last_exception_ignore_at < 0.8 or not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "order_exception_ignore")
         self.record_action("订单异常提醒，按文字点击忽略")
         self.last_exception_ignore_at = now
         await self.click_visual_target(browser, rect, target)
@@ -2475,7 +2404,6 @@ class CanvasBot:
         last_ignore = getattr(self, "last_system_ignore_at", 0.0)
         if now - last_ignore < 0.8 or not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "system_dialog_ignore")
         self.record_action("系统提示，按文字点击忽略")
         self.last_system_ignore_at = now
         await self.click_visual_target(browser, rect, target)
@@ -2496,7 +2424,6 @@ class CanvasBot:
         last_ack = getattr(self, "last_trade_success_ack_at", 0.0)
         if now - last_ack < 0.8 or not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "trade_success_ack")
         self.record_action("交易成功提示，点击知道了关闭")
         await self.click_visual_target(browser, rect, target)
         self.last_trade_success_ack_at = now
@@ -2530,7 +2457,6 @@ class CanvasBot:
         title_x, title_y = title.center
         close_x = clamp(title_x + width * 0.235, width * 0.58, width * 0.92)
         close_y = clamp(title_y - height * 0.028, height * 0.10, height * 0.45)
-        await self.save_action_debug(image, boxes, "system_notice_close")
         self.record_action("系统安全通知，点击右上角关闭")
         self.last_system_notice_close_at = now
         await browser.click_abs(rect.left + close_x, rect.top + close_y)
@@ -2554,7 +2480,6 @@ class CanvasBot:
         target = self.find_submit_confirm_dialog(image, boxes)
         if not target or not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "submit_confirm_dialog")
         self.record_action("识别到变现二次确认弹窗，点击确认")
         await self.click_visual_target(browser, rect, target)
         self.submit_confirm_until = 0.0
@@ -2589,7 +2514,6 @@ class CanvasBot:
             # tab does not exist there, so waiting for it would otherwise time out.
             if self.is_order_detail_interrupt_page(image, boxes):
                 if now - self.last_post_accept_detail_back_at >= 1.5:
-                    await self.save_action_debug(image, boxes, "post_accept_detail_back")
                     self.record_action("接单后在订单详情，点击左上角返回订单列表")
                     back = self.resolve_top_left_back_point(image, boxes)
                     await browser.click_relative(rect, float(back[0]), float(back[1]))
@@ -2601,7 +2525,6 @@ class CanvasBot:
             if not target:
                 print("[state] 等待订单页标签出现。")
                 return True
-            await self.save_action_debug(image, boxes, "order_page_tab")
             self.record_action("返回后点击订单页检查是否有进行中订单")
             await self.click_visual_target(browser, rect, target)
             self.post_accept_order_check = "inspect"
@@ -2637,7 +2560,6 @@ class CanvasBot:
         if not target:
             print("[state] 已确认没有进行中订单，等待搬砖标签出现。")
             return True
-        await self.save_action_debug(image, boxes, "return_to_move_page")
         self.record_action("订单页无进行中订单，返回搬砖页重新挂单")
         await self.click_visual_target(browser, rect, target)
         self.post_accept_order_check = ""
@@ -2683,7 +2605,6 @@ class CanvasBot:
         rect, image, boxes = await self.scan_app(browser)
         target = self.resolve_canvas_field_target(image, boxes, label_terms, x_ratio)
         if not target:
-            await self.save_action_debug(image, boxes, f"field_{label}_not_found")
             print(f"[warn] 未识别{label}标签，不填写该字段。")
             return False
 
@@ -2695,7 +2616,6 @@ class CanvasBot:
                 rect, image, boxes = await self.scan_app(browser)
                 target = self.resolve_canvas_field_target(image, boxes, label_terms, x_ratio)
                 if not target:
-                    await self.save_action_debug(image, boxes, f"field_{label}_retry_target_not_found")
                     print(f"[warn] 重试时未识别{label}输入框，停止本次挂单。")
                     return False
             x, y = target
@@ -2712,7 +2632,6 @@ class CanvasBot:
             if attempt == 0:
                 self.record_state("field_value_retry", f"{label}视觉校验未通过，重新输入。", interval_sec=5.0)
 
-        await self.save_action_debug(verify_image, verify_boxes, f"field_{label}_not_verified")
         print(f"[warn] 未在{label}输入框确认数值 {value}，停止本次挂单。")
         return False
 
@@ -2746,7 +2665,6 @@ class CanvasBot:
             0.50,
         )
         if not field:
-            await self.save_action_debug(image, boxes, "amount_all_target_not_found")
             print("[warn] 未识别变现金额输入框，不点击全部。")
             return False
         width, height = image.size
@@ -2763,7 +2681,6 @@ class CanvasBot:
             bounds=(width * 0.65, field[1] - height * 0.12, width * 0.98, field[1] + height * 0.12),
         )
         if not target:
-            await self.save_action_debug(image, boxes, "amount_all_not_found")
             print("[warn] 未识别变现金额的全部按钮，不执行坐标点击。")
             return False
         self.record_action("点击变现金额全部")
@@ -2800,7 +2717,6 @@ class CanvasBot:
             if self.is_field_value_visible(verify_boxes, value, field, verify_image):
                 print(f"[state] 页面将全部金额取整为 {value}，继续填写限额")
                 return True
-        await self.save_action_debug(verify_image, verify_boxes, "amount_all_not_verified")
         print(f"[warn] 点击全部后未确认变现金额 {expected_amount}，停止本次挂单。")
         return False
 
@@ -2826,7 +2742,6 @@ class CanvasBot:
         """Fill and verify Flutter's hidden six-digit password input."""
         target = self.resolve_password_field_target(image, boxes)
         if not target:
-            await self.save_action_debug(image, boxes, "password_field_not_found")
             print("[warn] 未识别支付密码输入格，不输入密码。")
             return False
         x, y = target
@@ -2905,7 +2820,6 @@ class CanvasBot:
         first_card = self.find_first_payment_card_target(image, boxes)
         initial_target = self.find_payment_card_target(image, boxes, keyword)
         if first_card and first_card is not initial_target:
-            await self.save_action_debug(image, boxes, "payment_deselect")
             self.record_action(f"取消默认收款方式：{first_card.text}")
             await self.click_payment_card_row(browser, rect, first_card)
             await asyncio.sleep(0.30)
@@ -2917,7 +2831,6 @@ class CanvasBot:
             rect, image, boxes = await self.scan_app(browser)
             target = self.find_payment_card_target(image, boxes, keyword)
             if target:
-                await self.save_action_debug(image, boxes, "payment_select")
                 self.record_action(f"按文字选择收款卡片：{target.text}")
                 await self.click_payment_card_row(browser, rect, target)
                 self.payment_selected_for_form = True
@@ -2925,7 +2838,6 @@ class CanvasBot:
 
             entry = self.find_payment_picker_entry(image, boxes)
             if entry:
-                await self.save_action_debug(image, boxes, "payment_entry")
                 self.record_action("按文字打开收款方式选择页")
                 await self.click_visual_target(browser, rect, entry)
                 await asyncio.sleep(0.35)
@@ -2936,7 +2848,6 @@ class CanvasBot:
                 await browser.wheel_relative(rect, 0.5, 0.76, 520)
                 await asyncio.sleep(0.42)
 
-        await self.save_action_debug(image, boxes, "payment_not_found")
         print(f"[warn] 未按文字找到收款卡片：{keyword}，不使用卡片序号坐标兜底。")
         return False
 
@@ -2952,11 +2863,9 @@ class CanvasBot:
         rect, image, boxes = await self.scan_app(browser)
         submit = self.find_bottom_action_target(image, boxes, self.texts.get("submit", []))
         if not submit:
-            await self.save_action_debug(image, boxes, "submit_not_found")
             print("[warn] 未识别底部确认变现，不执行坐标点击。")
             return False
 
-        await self.save_action_debug(image, boxes, "submit")
         self.record_action("按文字点击底部确认变现")
         self.submit_confirm_until = time.time() + max(10.0, cfg["secondary_confirm_timeout_sec"] + 5.0)
         await self.click_visual_target(browser, rect, submit)
@@ -3041,12 +2950,10 @@ class CanvasBot:
             max_text_length=12,
         )
         if target:
-            await self.save_action_debug(image, boxes, "password_confirm")
             self.record_action("检测到支付密码确认按钮，点击确认")
             await self.click_visual_target(browser, rect, target)
             return True
 
-        await self.save_action_debug(image, boxes, "password_confirm_not_found")
         print("[warn] 支付密码弹窗仍在但未识别确认文字，不执行坐标点击。")
         return False
 
@@ -3093,7 +3000,6 @@ class CanvasBot:
             )
 
             if target:
-                await self.save_action_debug(image, boxes, "secondary_confirm")
                 self.record_action("按文字点击底部二次确认")
                 await self.click_visual_target(browser, rect, target)
                 return True
@@ -3103,7 +3009,6 @@ class CanvasBot:
                 f"{elapsed:.1f}/{cfg['secondary_confirm_timeout_sec']:.1f}s"
             )
 
-        await self.save_action_debug(image, boxes, "secondary_confirm_not_found")
         print("[warn] 未检测到底部二次确认，不执行坐标点击。")
         return False
 
@@ -3197,7 +3102,6 @@ class CanvasBot:
                 if not history_below:
                     max_steps = self.multi_cancel_search_max_steps()
                     if self.multi_cancel_scroll_steps >= max_steps:
-                        await self.save_action_debug(image, boxes, "cancel_tail_not_confirmed")
                         print(f"[warn] 已向下扫描 {max_steps} 次仍未确认活动订单尾部，不点击取消。")
                         return True
                     self.record_action(
@@ -3230,7 +3134,6 @@ class CanvasBot:
                 exclude=self.texts.get("done", []),
             )
         if not target:
-            await self.save_action_debug(image, boxes, "cancel_not_found")
             print("[warn] 未识别取消按钮，不执行坐标点击。")
             return True
 
@@ -3276,7 +3179,6 @@ class CanvasBot:
             print(f"[state] 等待识别取消确认弹窗 {elapsed:.1f}/{cfg['confirm_timeout_sec']:.1f}s")
             return True
 
-        await self.save_action_debug(image, boxes, "cancel_confirm")
         self.record_action("识别到取消确认弹窗，点击确认")
         await self.click_visual_target(browser, rect, target)
 
@@ -3310,7 +3212,6 @@ class CanvasBot:
         if self.multi_order_enabled():
             balance = self.find_available_balance(image, boxes)
             if balance is None:
-                await self.save_action_debug(image, boxes, "balance_not_found")
                 print("[warn] 未识别顶部搬砖余额，不新增挂单。")
                 return True
             if not self.prepare_multi_order_values(balance):
@@ -3318,7 +3219,6 @@ class CanvasBot:
 
         target = self.find_start_order_target(image, boxes)
         if not target:
-            await self.save_action_debug(image, boxes, "start_not_found")
             print("[state] 未检测到开始搬砖按钮，本轮不点击。")
             return True
 
@@ -3362,7 +3262,7 @@ class CanvasBot:
                 return True
             if now <= self.form_expected_until:
                 if self.form_submission_failed:
-                    self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
+                    self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，请检查浏览器页面和运行日志。")
                     return True
                 if self.is_order_form_visible(image, boxes):
                     return await self.fill_and_submit_canvas_order_form(browser, rect)
@@ -3373,7 +3273,7 @@ class CanvasBot:
 
         if self.is_order_form_visible(image, boxes):
             if self.form_submission_failed:
-                self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，等待你检查调试截图。")
+                self.record_state("form_submission_failed", "本次挂单未完成视觉校验，暂停重试，请检查浏览器页面和运行日志。")
                 return True
             return await self.fill_and_submit_canvas_order_form(browser, rect)
 
@@ -3431,7 +3331,6 @@ class CanvasBot:
 
         balance = self.find_available_balance(image, boxes)
         if balance is None:
-            await self.save_action_debug(image, boxes, "balance_not_found")
             print("[warn] 未识别顶部搬砖余额，不新增挂单。")
             return True
         minimum_remaining = Decimal(str(self.cfg.get("limit_min") or "0"))
@@ -3490,7 +3389,6 @@ class CanvasBot:
         if not target:
             print("[state] 订单页已空，等待搬砖标签出现。")
             return True
-        await self.save_action_debug(image, boxes, "empty_order_return_move")
         self.record_action("订单页无进行中订单，返回搬砖页继续挂单")
         await self.click_visual_target(browser, rect, target)
         self.multi_pending_since.clear()
@@ -3530,7 +3428,6 @@ class CanvasBot:
         if now - self.last_orders_refresh_at < 60:
             return False
         self.last_orders_refresh_at = now
-        await self.save_action_debug(image, boxes, "orders_pull_refresh")
         self.record_action("订单页每分钟下拉刷新")
         # Start below the status tabs and above the bottom navigation. The gesture
         # lands in empty list content even when a single order card is visible.
@@ -3609,7 +3506,6 @@ class CanvasBot:
         last_back = getattr(self, "last_order_detail_back_at", 0.0)
         if now - last_back < 1.5 or not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "order_detail_back")
         self.record_action("订单详情页，点击左上角返回")
         back = self.resolve_top_left_back_point(image, boxes)
         await browser.click_relative(rect, float(back[0]), float(back[1]))
@@ -3623,7 +3519,6 @@ class CanvasBot:
             return True
         if not self.can_act():
             return True
-        await self.save_action_debug(image, boxes, "move_page_tab")
         self.record_action("按文字点击顶部搬砖页面")
         await self.click_visual_target(browser, rect, target)
         self.move_page_opened = True
@@ -3641,8 +3536,7 @@ class CanvasBot:
         consecutive_scans, cooldown_sec = self.unknown_page_refresh_cfg()
         capture_after_scans, _error_cooldown_sec = self.diagnostics_cfg()
         if self.unknown_page_streak == capture_after_scans:
-            await self.maybe_save_debug(image, boxes, "unknown_page", force=True)
-            print(f"[diagnostic] 未知页面持续 {capture_after_scans} 次扫描，已保存现场截图。")
+            print(f"[diagnostic] 未知页面持续 {capture_after_scans} 次扫描，请检查浏览器页面和运行日志。")
         if self.unknown_page_streak < consecutive_scans:
             print(f"[state] 未识别当前页面，等待刷新阈值 {self.unknown_page_streak}/{consecutive_scans}。")
             return True
@@ -3653,7 +3547,6 @@ class CanvasBot:
             print("[state] 未识别页面仍在刷新冷却期，不执行任何点击。")
             return True
 
-        await self.save_action_debug(image, boxes, "unknown_page_reload")
         self.record_action("连续未识别页面，刷新当前网页重试")
         self.last_unknown_page_reload_at = now
         self.unknown_page_streak = 0
@@ -3708,9 +3601,6 @@ class CanvasBot:
         ocr_started = time.perf_counter()
         boxes = self.vision.read_text(image)
         self.runtime_monitor.record_scan(screenshot_sec, time.perf_counter() - ocr_started)
-
-        if self.cfg.get("debug", {}).get("save_each_tick"):
-            await self.maybe_save_debug(image, boxes, "tick")
 
         print(f"[scan] app={rect.source} {rect.width:.0f}x{rect.height:.0f} ocr={len(boxes)}")
 
@@ -3788,9 +3678,6 @@ async def snapshot(cfg: dict[str, Any]) -> None:
         rect = await browser.app_rect()
         image = await browser.screenshot_app(rect)
         boxes = bot.vision.read_text(image)
-        output = bot.debug_dir / f"snapshot_{int(time.time())}.png"
-        bot.vision.save_debug(image, boxes, output, note=f"{rect.source} {rect.width:.0f}x{rect.height:.0f}")
-        print(f"[snapshot] saved: {output}")
         print(f"[snapshot] page: {diag.get('title')!r} {diag.get('url')}")
         print(
             "[snapshot] dom: "
@@ -3897,7 +3784,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for name, help_text in {
         "doctor": "Check local dependencies and config.",
         "login": "Open browser and wait for manual login before closing.",
-        "snapshot": "Open browser, capture app screenshot, and print OCR text.",
+        "snapshot": "Open browser and print OCR text from an in-memory screenshot.",
         "run": "Run the automation loop.",
     }.items():
         subparser = subparsers.add_parser(name, help=help_text)

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -6,12 +7,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from canvas_bot.dashboard import DashboardState, public_config, validate_dashboard_settings, write_config
+from canvas_bot.dashboard import DashboardState, public_config, tail_text, validate_dashboard_settings, write_config
 from canvas_bot.services.telegram import TelegramNotifier
 
 
 class DashboardConfigTests(unittest.TestCase):
     def setUp(self) -> None:
+        load = patch("canvas_bot.dashboard.load_remembered_secrets", return_value={})
+        load.start()
+        self.addCleanup(load.stop)
+        save = patch("canvas_bot.dashboard.save_remembered_secrets")
+        save.start()
+        self.addCleanup(save.stop)
         self.cfg = {
             "amount": "3000",
             "limit_min": "1000",
@@ -115,7 +122,8 @@ class DashboardConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "6 位数字"):
             state.set_payment_password("12345")
 
-    def test_clears_only_previous_run_screenshots_and_keeps_log_handle_safe(self) -> None:
+    @patch("canvas_bot.dashboard.subprocess.Popen")
+    def test_start_preserves_existing_images_and_closes_stale_log_handle(self, popen: Mock) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "settings.json"
@@ -128,12 +136,38 @@ class DashboardConfigTests(unittest.TestCase):
             (debug_dir / "dashboard-bot.log").write_text("old log", encoding="utf-8")
             (debug_dir / "keep.txt").write_text("keep", encoding="utf-8")
             state = DashboardState(config_path, root)
+            stale_log = (debug_dir / "dashboard-bot.log").open("a", encoding="utf-8")
+            state.process_log = stale_log
 
-            state.clear_previous_run_artifacts()
+            ok, _message = state.start()
 
-            self.assertFalse((debug_dir / "old_tick.png").exists())
-            self.assertTrue((debug_dir / "dashboard-bot.log").exists())
-            self.assertTrue((debug_dir / "keep.txt").exists())
+            self.assertTrue(ok)
+            popen.assert_called_once()
+            self.assertTrue(stale_log.closed)
+            self.assertIsNone(state.process_log)
+            self.assertEqual((debug_dir / "old_tick.png").read_bytes(), b"image")
+            self.assertEqual((debug_dir / "keep.txt").read_text(encoding="utf-8"), "keep")
+            self.assertIn("[dashboard] started", (debug_dir / "dashboard-bot.log").read_text(encoding="utf-8"))
+            self.assertEqual({path.name for path in debug_dir.iterdir()}, {"old_tick.png", "dashboard-bot.log", "keep.txt"})
+
+    def test_tail_text_reads_only_bounded_log_suffix(self) -> None:
+        log_file = Mock(wraps=io.BytesIO(b"x" * 100_000 + "\n旧行\r\n最新日志\x00\r\n".encode("utf-8")))
+        with patch.object(Path, "open") as open_file:
+            open_file.return_value.__enter__.return_value = log_file
+            self.assertEqual(tail_text(Path("bot.log"), 2), "旧行\n最新日志")
+            open_file.assert_called_once_with("rb")
+            log_file.read.assert_called_once_with(65_536)
+            self.assertEqual(tail_text(Path("bot.log"), 0), "")
+            open_file.assert_called_once()
+
+        with patch.object(Path, "open", side_effect=FileNotFoundError):
+            self.assertEqual(tail_text(Path("missing.log"), 2), "")
+
+    def test_tail_text_keeps_suffix_of_long_unterminated_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bot.log"
+            path.write_bytes(b"x" * 100_000)
+            self.assertEqual(tail_text(path, 1), "x" * 65_536)
 
     def test_bot_environment_contains_token_but_not_the_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

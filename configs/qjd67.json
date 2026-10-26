@@ -360,10 +360,7 @@
   },
   "templates_dir": "templates",
   "debug": {
-    "dir": "debug-screenshots",
-    "save_each_tick": false,
-    "save_on_action": true,
-    "draw_ocr": true
+    "dir": "debug-screenshots"
   },
   "performance_monitor": {
     "enabled": true,

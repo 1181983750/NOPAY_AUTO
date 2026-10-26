@@ -81,7 +81,6 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
     payment = cfg.get("payment", {})
     cancel_flow = cfg.get("cancel_flow", {})
     submit_flow = cfg.get("submit_flow", {})
-    debug = cfg.get("debug", {})
     password = cfg.get("password", {})
     multi_order = cfg.get("multi_order", {})
     notification = cfg.get("notification", {})
@@ -113,7 +112,6 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "submit_secondary_confirm_delay_sec": speed["secondary_confirm_delay_sec"],
         "submit_secondary_confirm_timeout_sec": submit_flow.get("secondary_confirm_timeout_sec", 7.0),
         "submit_password_timeout_sec": submit_flow.get("password_timeout_sec", 8.0),
-        "debug_save_each_tick": bool(debug.get("save_each_tick", False)),
         "password_env": str(password.get("env") or "QJD67_PAY_PASSWORD"),
         "password_available": bool(os.getenv(str(password.get("env") or "QJD67_PAY_PASSWORD"))),
         "pushplus_transfer_name": str(notification.get("transfer_name") or ""),
@@ -195,7 +193,6 @@ def validate_dashboard_settings(cfg: dict[str, Any], values: dict[str, Any]) -> 
     form_input = updated.setdefault("form_input", {})
     form_input["focus_wait_sec"] = speed["form_focus_wait_sec"]
     form_input["verify_wait_sec"] = speed["form_verify_wait_sec"]
-    updated.setdefault("debug", {})["save_each_tick"] = _flag(values.get("debug_save_each_tick"))
     updated.setdefault("notification", {})["transfer_name"] = transfer_name
     return updated
 
@@ -294,28 +291,16 @@ class DashboardState:
         values["pushplus_token_value"] = self.pushplus_token
         return values
 
-    def clear_previous_run_artifacts(self) -> None:
-        """Keep each dashboard-started run's screenshots and bot log self-contained."""
-        self.debug_dir.mkdir(parents=True, exist_ok=True)
-        for path in self.debug_dir.iterdir():
-            if not path.is_file():
-                continue
-            # Keep the log file in place. On Windows another dashboard/bot
-            # process may still hold it open, making unlink fail with WinError 32.
-            if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-                path.unlink()
-
     def start(self) -> tuple[bool, str]:
         with self.lock:
             if self.running():
                 return False, "脚本已经由本控制台启动。"
             # A crashed or naturally exited child can leave the redirected log
-            # handle open. Windows then refuses to remove the old log on the
-            # next start, so close the stale handle before cleanup.
+            # handle open. Close it before reopening the log on the next start.
             if self.process_log:
                 self.process_log.close()
                 self.process_log = None
-            self.clear_previous_run_artifacts()
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.stop_signal_path.unlink(missing_ok=True)
             self.process_log = self.log_path.open("w", encoding="utf-8", buffering=1)
             self.process_log.write(f"[dashboard] started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -345,7 +330,7 @@ class DashboardState:
                 env=self.process_environment(),
                 **process_options,
             )
-            return True, "已清除上一轮调试截图和运行日志，自动脚本已启动。"
+            return True, "自动脚本已启动。"
 
     def process_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
@@ -418,25 +403,19 @@ class DashboardState:
             "log": tail_text(self.log_path, 120),
         }
 
-    def screenshots(self) -> list[dict[str, Any]]:
-        if not self.debug_dir.exists():
-            return []
-        images = sorted(
-            (path for path in self.debug_dir.glob("*.png") if path.is_file()),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )[:12]
-        return [
-            {"name": path.name, "time": int(path.stat().st_mtime), "bytes": path.stat().st_size}
-            for path in images
-        ]
-
 
 def tail_text(path: Path, limit: int) -> str:
-    if not path.exists():
+    if limit <= 0:
         return ""
     try:
-        content = path.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+        with path.open("rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            start = max(0, log_file.tell() - 65_536)
+            log_file.seek(start)
+            data = log_file.read(65_536)
+        if start and b"\n" in data:
+            data = data.partition(b"\n")[2]
+        content = data.decode("utf-8", errors="replace").replace("\x00", "")
         return "\n".join(content.splitlines()[-limit:])
     except OSError:
         return ""
@@ -500,12 +479,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self.send_json(self.state.current_public_config())
             return
-        if path == "/api/screenshots":
-            self.send_json(self.state.screenshots())
-            return
-        if path.startswith("/debug/"):
-            self.serve_screenshot(path.removeprefix("/debug/"))
-            return
         self.send_json({"error": "未找到该地址"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -544,21 +517,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": f"保存失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self.send_json({"error": "未找到该地址"}, HTTPStatus.NOT_FOUND)
-
-    def serve_screenshot(self, name: str) -> None:
-        candidate = (self.state.debug_dir / Path(name).name).resolve()
-        directory = self.state.debug_dir.resolve()
-        if candidate.parent != directory or not candidate.is_file() or candidate.suffix.lower() != ".png":
-            self.send_json({"error": "截图不存在"}, HTTPStatus.NOT_FOUND)
-            return
-        content = candidate.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "image/png")
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(content)
-
 
 DASHBOARD_HTML = r"""<!doctype html>
 <html lang="zh-CN">
@@ -617,17 +575,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .metric b { display:block; font-size:12px; font-weight:500; color:var(--muted); }
     .metric span { display:block; margin-top:4px; font-size:16px; font-weight:650; }
     pre { margin:0; height:330px; overflow:auto; padding:12px; color:#d7e2f3; background:#172033; border-radius:6px; font:12px/1.45 Consolas, monospace; white-space:pre-wrap; word-break:break-word; }
-    .screens { grid-column:1 / -1; }
-    .gallery { padding:16px; display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
-    .shot { min-width:0; }
-    .shot button { padding:0; display:block; width:100%; height:180px; overflow:hidden; border-radius:6px; background:#eef2f7; }
-    .shot img { display:block; width:100%; height:100%; object-fit:contain; }
-    .shot small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-top:5px; color:var(--muted); }
-    dialog { max-width:min(92vw,850px); border:1px solid var(--line); border-radius:7px; padding:0; box-shadow:0 12px 42px rgba(17,33,58,.2); }
-    dialog::backdrop { background:rgba(23,32,51,.42); }
-    .dialog-head { padding:10px; display:flex; justify-content:flex-end; }
-    dialog img { display:block; max-width:86vw; max-height:82vh; }
-    @media (max-width:980px) { main { grid-template-columns:1fr; padding:14px; } .screens { grid-column:auto; } .header-inner { padding:12px 14px; } }
+    @media (max-width:980px) { main { grid-template-columns:1fr; padding:14px; } .header-inner { padding:12px 14px; } }
     @media (max-width:600px) { .form-grid { grid-template-columns:1fr 1fr; } .keyword-editor { grid-column:span 2; } .runtime-grid { grid-template-columns:1fr 1fr; } }
   </style>
 </head>
@@ -662,7 +610,6 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label><input name="auto_accept" type="checkbox"> 自动接单</label>
           <label><input name="multi_order_enabled" type="checkbox"> 多挂单直到低于最小限额</label>
           <label><input name="adopt_existing_pending_orders" type="checkbox"> <span class="field-label">启动后接管已有挂单 <span class="info" tabindex="0" aria-label="接管规则" title="从脚本启动时重新计时；超时后按最底部优先取消。">i</span></span></label>
-          <label><input name="debug_save_each_tick" type="checkbox"> 每轮保存截图</label>
         </div></fieldset>
         <fieldset><legend>通知文案</legend><div class="form-grid"><label>PushPlus 转账名称<input name="pushplus_transfer_name" type="text" maxlength="40" placeholder="例如：张三"></label></div></fieldset>
         <div class="form-footer"><span id="save-message" class="status-text"></span><button class="primary" type="submit">保存配置</button></div>
@@ -673,9 +620,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="form-footer" style="justify-content:flex-start"><label style="width:min(250px,100%)">支付密码<input id="payment-password" type="text" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="6 位数字"></label><button id="save-password" type="button">设置支付密码</button><label style="width:min(330px,100%)">PushPlus Token<input id="pushplus-token" type="text" autocomplete="off" placeholder="已记住的 Token 会显示在此"></label><button id="save-pushplus" type="button">设置 PushPlus</button></div>
       <pre id="log">等待日志...</pre>
     </div></section>
-    <section class="panel screens"><header><h2>调试截图</h2><span class="hint">最新 12 张</span></header><div id="gallery" class="gallery"></div></section>
   </main>
-  <dialog id="preview"><div class="dialog-head"><button type="button" id="close-preview">关闭</button></div><img alt="调试截图预览"></dialog>
   <script>
     const $ = (s) => document.querySelector(s);
     let config = null;
@@ -684,7 +629,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       fast: { poll_interval_sec: 0.5, action_throttle_sec: 0.45, submit_secondary_confirm_delay_sec: 0.35 },
     };
     const names = ['speed_mode','amount','limit_min','limit_max','repost_delay_sec','poll_interval_sec','action_throttle_sec','cancel_confirm_delay_sec','cancel_confirm_timeout_sec','submit_secondary_confirm_timeout_sec','payment_ocr_attempts','cancel_retry_interval_sec','submit_secondary_confirm_delay_sec','submit_password_timeout_sec','pushplus_transfer_name'];
-    const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders','debug_save_each_tick'];
+    const checks = ['auto_make_order','auto_repost','auto_accept','multi_order_enabled','adopt_existing_pending_orders'];
     async function request(url, options) { const r = await fetch(url, options); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
     function renderPaymentKeywords(options) { const list = $('#payment-keyword-list'); list.replaceChildren(); (options || []).forEach(option => { const row = document.createElement('div'); row.className = 'keyword-row'; const check = document.createElement('input'); check.type = 'checkbox'; check.checked = Boolean(option.enabled); check.title = '启用此关键词'; const input = document.createElement('input'); input.type = 'text'; input.maxLength = 80; input.value = option.keyword || ''; input.dataset.keyword = 'true'; input.setAttribute('aria-label', '收款关键词'); const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.removeKeyword = 'true'; remove.title = '删除关键词'; remove.setAttribute('aria-label', '删除关键词'); remove.textContent = '×'; row.append(check, input, remove); list.append(row); }); if (!list.children.length) { const empty = document.createElement('div'); empty.className = 'keyword-empty'; empty.textContent = '暂无关键词，请在下方添加。'; list.append(empty); } }
     function collectPaymentKeywords() { return [...document.querySelectorAll('#payment-keyword-list .keyword-row')].map(row => ({keyword: row.querySelector('[data-keyword]').value.trim(), enabled: row.querySelector('input[type="checkbox"]').checked})).filter(option => option.keyword); }
@@ -700,9 +645,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     function logNearBottom(log) { return log.scrollHeight - log.scrollTop - log.clientHeight < 18; }
     function renderLog(value) { const log = $('#log'); const follow = !logInitialized || logNearBottom(log); log.textContent = value || '暂无本控制台启动的日志。'; logInitialized = true; if (follow) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }); }
     async function refresh() { try { const s = await request('/api/status'); $('#state').textContent = s.running ? '运行中' : '未运行'; $('#state').className = `state ${s.running ? 'on' : ''}`; $('#run-state').textContent = s.running ? '运行中' : '未运行'; $('#pid').textContent = s.pid || '-'; $('#config-state').textContent = s.running ? '关键词热更新；其余重启' : '已就绪'; renderLog(s.log); $('#start').disabled = s.running; $('#stop').disabled = !s.running; } catch (_) {} }
-    async function shots() { const gallery = $('#gallery'); const list = await request('/api/screenshots'); gallery.replaceChildren(); list.forEach(item => { const wrap=document.createElement('div'); wrap.className='shot'; const button=document.createElement('button'); const image=document.createElement('img'); image.loading='lazy'; image.src=`/debug/${encodeURIComponent(item.name)}?t=${item.time}`; image.alt=item.name; button.append(image); button.onclick=()=>{ $('#preview img').src=image.src; $('#preview').showModal(); }; const label=document.createElement('small'); label.textContent=item.name; wrap.append(button,label); gallery.append(wrap); }); }
-    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#add-payment-keyword').onclick=()=>{ const input=$('#new-payment-keyword'); const keyword=input.value.trim(); if (!keyword) return; const options=collectPaymentKeywords(); if (!options.some(option=>option.keyword===keyword)) options.push({keyword, enabled:true}); renderPaymentKeywords(options); input.value=''; }; $('#payment-keyword-list').onclick=(event)=>{ const button=event.target.closest('[data-remove-keyword]'); if (button) { button.closest('.keyword-row').remove(); } }; $('#save-password').onclick=savePassword; $('#save-pushplus').onclick=savePushPlus; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop'); $('#close-preview').onclick=()=>$('#preview').close();
-    Promise.all([loadConfig(), refresh(), shots()]); setInterval(refresh, 1500); setInterval(shots, 7000);
+    $('#settings').addEventListener('submit', save); $('[name="speed_mode"]').onchange=(event)=>applySpeedProfile(event.target.value); $('#add-payment-keyword').onclick=()=>{ const input=$('#new-payment-keyword'); const keyword=input.value.trim(); if (!keyword) return; const options=collectPaymentKeywords(); if (!options.some(option=>option.keyword===keyword)) options.push({keyword, enabled:true}); renderPaymentKeywords(options); input.value=''; }; $('#payment-keyword-list').onclick=(event)=>{ const button=event.target.closest('[data-remove-keyword]'); if (button) { button.closest('.keyword-row').remove(); } }; $('#save-password').onclick=savePassword; $('#save-pushplus').onclick=savePushPlus; $('#start').onclick=()=>control('start'); $('#stop').onclick=()=>control('stop');
+    Promise.all([loadConfig(), refresh()]); setInterval(refresh, 1500);
   </script>
 </body></html>"""
 
