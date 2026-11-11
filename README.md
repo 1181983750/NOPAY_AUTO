@@ -65,7 +65,7 @@ __pycache__/、*.egg-info/             # Python 缓存和元数据
 PyInstaller sidecar 和构建缓存不进入 Git。完成构建后，将最终 Tauri NSIS 单文件安装器放在 `release/`，通过 Git LFS 提交和推送：
 
 ```text
-release/NO 钱包自动化_0.1.6_x64-setup.exe
+release/NO 钱包自动化_0.1.7_x64-setup.exe
 ```
 
 安装器会在安装过程中展开 Python、OCR、浏览器和 CUDA 运行资源；“单文件”指分发时只有一个安装器，并不代表安装目录只有一个文件。GPU OCR 运行时包含 CUDA/cuDNN 组件，安装包体积会明显大于 CPU 版本。

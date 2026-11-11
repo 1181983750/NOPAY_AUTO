@@ -288,6 +288,48 @@ class PendingStateTests(unittest.TestCase):
         self.assertEqual(filled, [("变现金额", "3000"), ("最小限额", "1200")])
         self.assertFalse(bot.form_submission_failed)
 
+    def test_all_balance_uses_only_the_verified_amount_for_maximum_limit(self) -> None:
+        for rendered_amount, expected_result in [("3000", True), ("3", False)]:
+            with self.subTest(rendered_amount=rendered_amount):
+                bot = CanvasBot.__new__(CanvasBot)
+                bot.cfg = {}
+                bot.form_values = {"amount": "3000.75", "limit_min": "2000", "limit_max": "3000", "use_all_balance": "true"}
+                image = Image.new("RGB", (634, 1038), "white")
+                rect = Rect(0, 0, 634, 1038)
+                amount = TextBox(rendered_amount, 0.99, 40, 320, 115, 354)
+                bot.scan_app = AsyncMock(side_effect=[(rect, image, []), (rect, image, [amount])])
+                bot.resolve_canvas_field_target = Mock(return_value=(317.0, 337.0))
+                bot.vision = Mock(find_text=Mock(return_value=TextBox("全部", 0.99, 510, 320, 550, 354)))
+                bot.find_available_balance = Mock(return_value=Decimal("3.00"))
+                bot.click_visual_target = AsyncMock()
+
+                with patch("canvas_bot.__main__.asyncio.sleep", new_callable=AsyncMock):
+                    result = asyncio.run(bot.fill_canvas_all_balance(None, "3000.75"))
+
+                self.assertEqual(result, expected_result)
+                self.assertEqual(bot.form_values["limit_max"], "3000")
+                self.assertEqual(bot.form_values["amount"], "3000" if expected_result else "3000.75")
+                bot.find_available_balance.assert_not_called()
+
+    def test_invalid_limit_range_stops_before_selecting_card_or_submitting(self) -> None:
+        for maximum in ["3", "4000", "NaN", "bad"]:
+            with self.subTest(maximum=maximum):
+                bot = CanvasBot.__new__(CanvasBot)
+                bot.cfg = {"amount": "3000", "limit_min": "2000", "limit_max": maximum}
+                bot.form_values = {}
+                bot.last_form_submit_at = 0.0
+                bot.form_submission_failed = False
+                bot.fill_canvas_text_field = AsyncMock(return_value=True)
+                bot.keep_default_canvas_limit_max = AsyncMock(return_value=False)
+                bot.select_canvas_payment_card = AsyncMock(return_value=True)
+                bot.submit_canvas_order_form = AsyncMock(return_value=True)
+
+                asyncio.run(bot.fill_and_submit_canvas_order_form(None, Rect(0, 0, 634, 1038)))
+
+                self.assertTrue(bot.form_submission_failed)
+                bot.select_canvas_payment_card.assert_not_awaited()
+                bot.submit_canvas_order_form.assert_not_awaited()
+
     def test_withdraw_unavailable_page_uses_dynamic_left_back_position(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
@@ -1500,6 +1542,37 @@ class PendingStateTests(unittest.TestCase):
         value = TextBox("3000", 1.0, 44, 320, 91, 354)
 
         self.assertTrue(bot.is_field_value_visible([value], "3000", target, image))
+
+    def test_limit_value_validation_does_not_accept_the_other_input(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        image = Image.new("RGB", (634, 1038), "white")
+        minimum = TextBox("3000", 0.99, 40, 480, 110, 510)
+        maximum = TextBox("3", 0.99, 355, 480, 375, 510)
+
+        self.assertFalse(bot.is_field_value_visible([minimum, maximum], "3000", maximum.center, image, x_ratio=0.74))
+        self.assertFalse(bot.is_field_value_visible([minimum, maximum], "3", minimum.center, image, x_ratio=0.26))
+        maximum.text = "3000"
+        self.assertTrue(bot.is_field_value_visible([minimum, maximum], "3000", maximum.center, image, x_ratio=0.74))
+
+    def test_field_value_validation_compares_numeric_value_including_decimal_point(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        image = Image.new("RGB", (506, 900), "white")
+        target = (253.0, 337.0)
+        for rendered, expected in [("30.00", False), ("3", False), ("3000.00", True), ("3,000", True), ("3，000", True), ("余额3000", False)]:
+            with self.subTest(rendered=rendered):
+                value = TextBox(rendered, 0.99, 44, 320, 140, 354)
+                self.assertEqual(bot.is_field_value_visible([value], "3000", target, image), expected)
+
+    def test_maximum_field_target_does_not_use_a_number_in_the_minimum_half(self) -> None:
+        bot = CanvasBot.__new__(CanvasBot)
+        bot.vision = VisionEngine.__new__(VisionEngine)
+        image = Image.new("RGB", (506, 900), "white")
+        label = TextBox("单笔限额", 0.99, 30, 415, 125, 441)
+        minimum = TextBox("2000", 0.99, 230, 483, 270, 507)
+
+        target = bot.resolve_canvas_field_target(image, [label, minimum], ["单笔限额"], 0.74)
+
+        self.assertAlmostEqual(target[0], 506 * 0.74)
 
     def test_all_amount_can_be_verified_after_page_rounds_down_cents(self) -> None:
         bot = CanvasBot.__new__(CanvasBot)

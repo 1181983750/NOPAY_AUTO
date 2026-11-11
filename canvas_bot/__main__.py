@@ -2133,6 +2133,8 @@ class CanvasBot:
             if re.sub(r"\D", "", box.text)
             and abs(box.center[1] - input_y) <= height * 0.055
             and abs(box.center[0] - default_x) <= width * 0.25
+            and (x_ratio >= 0.4 or box.center[0] < width * 0.5)
+            and (x_ratio <= 0.6 or box.center[0] > width * 0.5)
         ]
         if numeric_candidates:
             closest = min(
@@ -2175,20 +2177,31 @@ class CanvasBot:
         expected: str,
         target: tuple[float, float],
         image: Image.Image,
+        *,
+        x_ratio: float = 0.50,
     ) -> bool:
-        expected_digits = re.sub(r"\D", "", str(expected))
-        if not expected_digits:
-            return True
+        try:
+            expected_value = Decimal(str(expected))
+        except InvalidOperation:
+            return False
+        if not expected_value.is_finite() or expected_value < 0:
+            return False
         target_x, target_y = target
         width, height = image.size
         for box in boxes:
-            digits = re.sub(r"\D", "", box.text)
-            if digits != expected_digits:
+            numeric_text = re.sub(r"[\s,，]", "", box.text)
+            if not re.fullmatch(r"\d+(?:\.\d{1,2})?", numeric_text):
+                continue
+            if Decimal(numeric_text) != expected_value:
                 continue
             x, y = box.center
+            if x_ratio < 0.4 and x >= width * 0.5:
+                continue
+            if x_ratio > 0.6 and x <= width * 0.5:
+                continue
             # Flutter inputs left-align their value, while the click target is centered.
-            # Keep the vertical tolerance tight but accept the full input-row width.
-            if abs(x - target_x) <= width * 0.48 and abs(y - target_y) <= height * 0.10:
+            # The two limit fields share a row, so validate only the intended half.
+            if abs(x - target_x) <= width * 0.48 and abs(y - target_y) <= height * 0.055:
                 return True
         return False
 
@@ -2626,7 +2639,7 @@ class CanvasBot:
             await asyncio.sleep(verify_wait)
 
             _, verify_image, verify_boxes = await self.scan_app(browser)
-            if self.is_field_value_visible(verify_boxes, str(value), target, verify_image):
+            if self.is_field_value_visible(verify_boxes, str(value), target, verify_image, x_ratio=x_ratio):
                 print(f"[state] 已确认{label}显示为 {value}")
                 return True
             if attempt == 0:
@@ -2650,7 +2663,7 @@ class CanvasBot:
             self.texts.get("limit_label", ["单笔限额"]),
             0.74,
         )
-        if target and self.is_field_value_visible(boxes, expected, target, image):
+        if target and self.is_field_value_visible(boxes, expected, target, image, x_ratio=0.74):
             print(f"[state] 最大限额已自动同步变现金额：{expected}，跳过填写")
             return True
         return False
@@ -2687,19 +2700,7 @@ class CanvasBot:
         await self.click_visual_target(browser, rect, target)
         await asyncio.sleep(0.28)
         _, verify_image, verify_boxes = await self.scan_app(browser)
-        actual_balance = self.find_available_balance(verify_image, verify_boxes)
         expected_values = [str(expected_amount)]
-        if actual_balance is not None:
-            actual_text = self.decimal_text(actual_balance)
-            expected_values.append(actual_text)
-            # Keep the remaining form steps aligned with the app's live balance.
-            # The amount field is rendered as an integer while the balance can
-            # still include cents, so the maximum limit follows the rounded value.
-            if self.form_values.get("use_all_balance") == "true":
-                self.form_values["amount"] = actual_text
-                self.form_values["limit_max"] = self.decimal_text(
-                    actual_balance.to_integral_value(rounding=ROUND_DOWN)
-                )
         rounded_values: list[str] = []
         for value in expected_values:
             try:
@@ -2709,13 +2710,19 @@ class CanvasBot:
             if rounded not in rounded_values:
                 rounded_values.append(rounded)
 
-        for value in expected_values:
+        for value in dict.fromkeys(expected_values + rounded_values):
             if self.is_field_value_visible(verify_boxes, value, field, verify_image):
-                print(f"[state] 已确认变现金额全部显示为 {value}")
-                return True
-        for value in rounded_values:
-            if self.is_field_value_visible(verify_boxes, value, field, verify_image):
-                print(f"[state] 页面将全部金额取整为 {value}，继续填写限额")
+                # Only the verified amount field may update the planned limits.
+                # A second OCR read of the balance label can truncate 3000 to 3.
+                if self.form_values.get("use_all_balance") == "true":
+                    self.form_values["amount"] = value
+                    self.form_values["limit_max"] = self.decimal_text(
+                        Decimal(value).to_integral_value(rounding=ROUND_DOWN)
+                    )
+                if value in expected_values:
+                    print(f"[state] 已确认变现金额全部显示为 {value}")
+                else:
+                    print(f"[state] 页面将全部金额取整为 {value}，继续填写限额")
                 return True
         print(f"[warn] 点击全部后未确认变现金额 {expected_amount}，停止本次挂单。")
         return False
@@ -3041,16 +3048,32 @@ class CanvasBot:
         if not await fill_amount:
             self.form_submission_failed = True
             return True
+        limit_min = values.get("limit_min") or str(self.cfg.get("limit_min") or "")
+        limit_max = values.get("limit_max") or str(self.cfg.get("limit_max") or "")
+        try:
+            amount_number = Decimal(values.get("amount") or amount)
+            minimum = Decimal(limit_min or "0")
+            maximum = Decimal(limit_max or str(amount_number))
+            valid_limits = (
+                all(value.is_finite() for value in (amount_number, minimum, maximum))
+                and amount_number > 0
+                and 0 <= minimum <= maximum <= amount_number
+            )
+        except InvalidOperation:
+            valid_limits = False
+        if not valid_limits:
+            print(f"[warn] 挂单限额无效：金额={values.get('amount') or amount}，最小限额={limit_min}，最大限额={limit_max}，停止本次挂单。")
+            self.form_submission_failed = True
+            return True
         if not await self.fill_canvas_text_field(
             browser,
             "最小限额",
             self.texts.get("limit_label", ["单笔限额"]),
             0.26,
-            values.get("limit_min") or str(self.cfg.get("limit_min") or ""),
+            limit_min,
         ):
             self.form_submission_failed = True
             return True
-        limit_max = values.get("limit_max") or str(self.cfg.get("limit_max") or "")
         max_is_default = self.configured_amount_matches_limit_max() and await self.keep_default_canvas_limit_max(
             browser,
             limit_max,

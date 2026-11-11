@@ -1,6 +1,6 @@
 [package]
 name = "nopay-desktop"
-version = "0.1.6"
+version = "0.1.7"
 description = "NO 钱包自动化桌面控制台"
 authors = ["NO Pay"]
 edition = "2021"
